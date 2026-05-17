@@ -1,0 +1,52 @@
+# ── Secrets and credentials ─────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+*.json.key
+service-account*.json
+*-credentials.json
+gcloud-credentials.json
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.cover
+
+# ── Node / Next.js ──────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# ── ChromaDB local storage ───────────────────────────────────────────────────
+chroma_db/
+chroma/
+
+# ── GCP / Google Cloud ──────────────────────────────────────────────────────
+.gcloud/
+gcloud-key.json
+application_default_credentials.json
+
+# ── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
