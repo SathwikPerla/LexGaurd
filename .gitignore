@@ -50,3 +50,4 @@ application_default_credentials.json
 # ── OS ──────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.claude/
