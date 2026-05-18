@@ -2,20 +2,19 @@
 negotiator.py — Agent 4: Negotiation Advisor.
 
 Input:  LegalReasonerOutput from Agent 3
-Output: NegotiationAdvisorOutput — final complete report with all 4 agents' data
+Output: NegotiationAdvisorOutput — Agent 3 clauses merged with negotiation advice
 
-Responsibilities:
-  - For RED/YELLOW clauses: recommended action (negotiate/reject), pushback rationale,
-    alternative wording, negotiation tips
-  - For GREEN clauses: recommended_action=accept, other negotiation fields empty
-  - Compute top_risks list (top 3–5 riskiest clauses summarised)
-  - Produce final executive_summary (refined version of Agent 3's summary)
+ARCHITECTURE: Agent 4 outputs ONLY the fields it uniquely adds:
+  - executive_summary, top_risks, overall_score (document-level)
+  - Per clause: recommended_action, pushback_rationale, alternative_wording,
+                negotiation_tips (keyed by clause_id for merging)
 
-Design decisions:
-  - All Agent 1–3 fields re-injected from source in _parse_response
-  - Negotiation fields are optional in Pydantic (pushback_rationale, alternative_wording)
-    so GREEN clauses with null values are valid
-  - overall_score computed from clause scores in graph.py, not trusted from Claude
+This keeps Agent 4's output ~200 tokens per clause instead of ~1500 per clause
+(the old approach re-stated all upstream fields), making the call safe for
+documents with 10+ clauses without hitting the 8192-token output limit.
+
+graph.py merges Agent 4's additions with Agent 3's full clause data to produce
+the final NegotiationAdvisorOutput.
 """
 from __future__ import annotations
 
@@ -35,54 +34,35 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT: str = """You are an experienced contract negotiation expert. You receive clauses that have been risk-scored and explained. Your job is to tell the signer exactly what to do about each clause — accept it, negotiate it, or reject it — and give them specific ammunition to push back.
+_SYSTEM_PROMPT: str = """You are a contract negotiation expert. You receive clauses that have been risk-scored and explained in plain English. Your job is to advise the signer on what to do.
 
 CRITICAL: Return ONLY valid JSON. No markdown. No explanation. Just raw JSON.
 
 SCHEMA:
 {
-  "document_type": "<same as input>",
-  "overall_score": <float 1.0–10.0, same as input>,
-  "red_count": 0,
-  "yellow_count": 0,
-  "green_count": 0,
-  "executive_summary": "<2–3 sentence actionable summary: what are the 1–2 most critical things to fix before signing?>",
-  "top_risks": ["<risk description with score, e.g. 'Broad IP assignment capturing personal projects (9.0/10)'>", ...],
-  "clauses": [
+  "executive_summary": "<2 sentences: what must be fixed before signing? Be direct and specific.>",
+  "top_risks": ["<clause type and score, e.g. 'IP transfer clause captures personal projects (9.5/10)'>"],
+  "overall_score": <float 1.0–10.0, weighted average>,
+  "negotiation_advice": [
     {
-      "clause_id": "<same from input>",
-      "clause_type": "<same from input>",
-      "original_text": "<same from input>",
-      "is_ambiguous": <same from input>,
-      "ambiguity_note": <same from input>,
-      "contradicts_clause_ids": <same from input>,
-      "severity_score": <same from input>,
-      "risk_level": "<same from input>",
-      "risk_label": "<same from input>",
-      "risk_category": "<same from input>",
-      "benchmark_comparison": "<same from input>",
-      "is_predatory": <same from input>,
-      "plain_language_explanation": "<same from input>",
-      "scenario_consequence": "<same from input>",
-      "key_implications": <same from input>,
+      "clause_id": "<same clause_id from input — do not change>",
       "recommended_action": "<accept|negotiate|reject>",
-      "pushback_rationale": "<null for GREEN/accept clauses, or string explaining WHY you should push back and what leverage you have>",
-      "alternative_wording": "<null for GREEN/accept clauses, or a concrete rewrite of the clause that is fair to both parties>",
-      "negotiation_tips": ["<tip 1>", "<tip 2>"] or []
+      "pushback_rationale": "<1–2 sentences: why push back, what leverage you have>",
+      "alternative_wording": "<1–3 sentences: rewritten clause text that is fair to both parties>",
+      "negotiation_tips": ["<tip 1 — concrete action>", "<tip 2 — concrete action>"]
     }
   ]
 }
 
-NEGOTIATION RULES:
-1. RED clauses (severity 7–10): recommended_action should be "negotiate" or "reject". Provide specific pushback_rationale and concrete alternative_wording.
-2. YELLOW clauses (severity 4–6.9): recommended_action should usually be "negotiate". Provide pushback_rationale; alternative_wording is helpful but optional.
-3. GREEN clauses (severity 1–3.9): recommended_action should be "accept". Set pushback_rationale=null, alternative_wording=null, negotiation_tips=[].
-4. pushback_rationale: Explain the legal or business reason this clause is unfair. Reference industry standards. Be specific.
-5. alternative_wording: Write the clause as it SHOULD read to be fair. This is actual contract language, not advice.
-6. negotiation_tips: 2–3 short, actionable steps the signer can take. E.g. "Request a 6-month limitation", "Ask for garden leave pay".
-7. top_risks: List the 3–5 highest-severity clauses with their scores. Include severity score in parentheses.
-8. executive_summary: Lead with action — what must be changed before this contract can be signed safely?
-9. Preserve ALL other fields exactly from input. Include ALL clauses."""
+RULES:
+1. RED (score 7–10): recommended_action = negotiate or reject. Always provide pushback_rationale and alternative_wording.
+2. YELLOW (score 4–6.9): recommended_action = negotiate. Provide pushback_rationale; alternative_wording optional.
+3. GREEN (score 1–3.9): recommended_action = accept. Set pushback_rationale=null, alternative_wording=null, negotiation_tips=[].
+4. Keep pushback_rationale to 1–2 sentences — be direct about the problem and leverage.
+5. Keep alternative_wording short (1–3 sentences of actual contract language, not advice).
+6. top_risks: list 3–5 highest-severity clauses with their scores.
+7. Include ALL clauses in negotiation_advice — do not drop any.
+8. overall_score: weighted average (RED clauses weighted 2x, YELLOW 1x, GREEN 0.5x)."""
 
 
 class NegotiatorAgent:
@@ -93,147 +73,87 @@ class NegotiatorAgent:
         clauses_text = []
         for c in reasoner_output.clauses:
             entry = (
-                f"CLAUSE {c.clause_id} [{c.clause_type.value}] — "
-                f"{c.risk_level.value} (score={c.severity_score}):\n"
+                f"clause_id={c.clause_id}  [{c.clause_type.value}]  "
+                f"{c.risk_level.value} (score={c.severity_score})  "
+                f"predatory={c.is_predatory}\n"
+                f"  Text: {c.original_text[:150]}...\n" if len(c.original_text) > 150 else
                 f"  Text: {c.original_text}\n"
-                f"  Explanation: {c.plain_language_explanation}\n"
-                f"  Scenario: {c.scenario_consequence}\n"
-                f"  Is predatory: {c.is_predatory}"
             )
+            entry += f"  Explanation: {c.plain_language_explanation[:120]}..."
             clauses_text.append(entry)
 
         red = sum(1 for c in reasoner_output.clauses if c.risk_level == RiskLevel.RED)
         yellow = sum(1 for c in reasoner_output.clauses if c.risk_level == RiskLevel.YELLOW)
 
         return (
-            f"Provide negotiation advice for {len(reasoner_output.clauses)} clauses "
-            f"from a '{reasoner_output.document_type}' contract. "
-            f"Overall score: {reasoner_output.overall_score}/10. "
-            f"{red} RED clauses, {yellow} YELLOW clauses require attention.\n\n"
+            f"Advise on {len(reasoner_output.clauses)} clauses from a "
+            f"'{reasoner_output.document_type}' contract. "
+            f"{red} RED, {yellow} YELLOW clauses need attention.\n\n"
             + "\n\n".join(clauses_text)
-            + "\n\nReturn the complete JSON with recommended_action, pushback_rationale, "
-              "alternative_wording, negotiation_tips for each clause, plus top_risks and "
-              "executive_summary."
+            + "\n\nReturn ONLY the negotiation_advice JSON as specified."
         )
 
     def _coerce_action(self, raw: str | None, risk_level: str) -> str:
-        """Ensure recommended_action is valid and consistent with risk level."""
         valid = {"accept", "negotiate", "reject"}
         val = (raw or "").lower().strip()
         if val in valid:
             return val
-        # Derive from risk level if missing/invalid
-        if risk_level == "GREEN":
-            return "accept"
-        if risk_level == "RED":
-            return "negotiate"
-        return "negotiate"
+        return "accept" if risk_level == "GREEN" else "negotiate"
 
     def _parse_response(
         self, raw: Any, source: LegalReasonerOutput
-    ) -> NegotiationAdvisorOutput:
-        if isinstance(raw, list):
-            raw = {
-                "document_type": source.document_type,
-                "overall_score": source.overall_score,
-                "red_count": 0, "yellow_count": 0, "green_count": 0,
-                "executive_summary": source.executive_summary,
-                "top_risks": [],
-                "clauses": raw,
-            }
+    ) -> dict[str, Any]:
+        """
+        Validate and clean Agent 4's minimal response.
+
+        Returns a dict with keys: executive_summary, top_risks, overall_score,
+        and negotiation_advice (dict keyed by clause_id for merging).
+        """
+        import copy
         if not isinstance(raw, dict):
             raise ValueError(f"Expected dict from Agent 4, got {type(raw).__name__}")
+        # Deep copy so we never mutate the caller's dict (important for test isolation)
+        raw = copy.deepcopy(raw)
 
-        raw.setdefault("document_type", source.document_type)
-        raw.setdefault("overall_score", source.overall_score)
         raw.setdefault("executive_summary", source.executive_summary)
         raw.setdefault("top_risks", [])
-        raw.setdefault("red_count", 0)
-        raw.setdefault("yellow_count", 0)
-        raw.setdefault("green_count", 0)
-
         try:
-            overall = float(raw["overall_score"])
-            raw["overall_score"] = max(1.0, min(10.0, overall))
+            raw["overall_score"] = max(1.0, min(10.0, float(raw.get("overall_score", source.overall_score))))
         except (ValueError, TypeError):
             raw["overall_score"] = source.overall_score
 
-        source_lookup = {c.clause_id: c for c in source.clauses}
-        coerced: list[dict] = []
-        seen_ids: set[str] = set()
-
-        for clause in raw.get("clauses", []):
-            if not isinstance(clause, dict):
+        # Build advice lookup
+        advice_lookup: dict[str, dict] = {}
+        for item in raw.get("negotiation_advice", []):
+            if not isinstance(item, dict):
                 continue
-            cid = clause.get("clause_id", "")
-            seen_ids.add(cid)
-
-            # Re-inject ALL upstream fields to prevent data loss
-            if cid in source_lookup:
-                src = source_lookup[cid]
-                clause["clause_id"] = src.clause_id
-                clause["clause_type"] = src.clause_type.value
-                clause["original_text"] = src.original_text
-                clause["is_ambiguous"] = src.is_ambiguous
-                clause["ambiguity_note"] = src.ambiguity_note
-                clause["contradicts_clause_ids"] = src.contradicts_clause_ids
-                clause["severity_score"] = src.severity_score
-                clause["risk_level"] = src.risk_level.value
-                clause["risk_label"] = src.risk_label.value
-                clause["risk_category"] = src.risk_category.value
-                clause["benchmark_comparison"] = src.benchmark_comparison
-                clause["is_predatory"] = src.is_predatory
-                clause["plain_language_explanation"] = src.plain_language_explanation
-                clause["scenario_consequence"] = src.scenario_consequence
-                clause["key_implications"] = src.key_implications
-
-            risk_level = clause.get("risk_level", "YELLOW")
-            clause["recommended_action"] = self._coerce_action(
-                clause.get("recommended_action"), risk_level
+            cid = item.get("clause_id", "")
+            if not cid:
+                continue
+            risk_level = next(
+                (c.risk_level.value for c in source.clauses if c.clause_id == cid),
+                "YELLOW",
             )
+            advice_lookup[cid] = {
+                "recommended_action": self._coerce_action(item.get("recommended_action"), risk_level),
+                "pushback_rationale": item.get("pushback_rationale") or None,
+                "alternative_wording": item.get("alternative_wording") or None,
+                "negotiation_tips": item.get("negotiation_tips") or [],
+            }
 
-            # GREEN clauses should have empty negotiation fields
-            if risk_level == "GREEN":
-                clause.setdefault("pushback_rationale", None)
-                clause.setdefault("alternative_wording", None)
-                clause.setdefault("negotiation_tips", [])
-            else:
-                clause.setdefault("pushback_rationale", "This clause may not reflect industry standard.")
-                clause.setdefault("alternative_wording", None)
-                clause.setdefault("negotiation_tips", [])
-
-            coerced.append(clause)
-
-        # Re-add dropped clauses
-        for cid, src in source_lookup.items():
-            if cid not in seen_ids:
-                logger.warning("Agent 4 dropped clause — re-adding", extra={"clause_id": cid})
-                action = "accept" if src.risk_level == RiskLevel.GREEN else "negotiate"
-                coerced.append({
-                    "clause_id": src.clause_id,
-                    "clause_type": src.clause_type.value,
-                    "original_text": src.original_text,
-                    "is_ambiguous": src.is_ambiguous,
-                    "ambiguity_note": src.ambiguity_note,
-                    "contradicts_clause_ids": src.contradicts_clause_ids,
-                    "severity_score": src.severity_score,
-                    "risk_level": src.risk_level.value,
-                    "risk_label": src.risk_label.value,
-                    "risk_category": src.risk_category.value,
-                    "benchmark_comparison": src.benchmark_comparison,
-                    "is_predatory": src.is_predatory,
-                    "plain_language_explanation": src.plain_language_explanation,
-                    "scenario_consequence": src.scenario_consequence,
-                    "key_implications": src.key_implications,
+        # Fill missing clause_ids with safe defaults
+        for clause in source.clauses:
+            if clause.clause_id not in advice_lookup:
+                logger.warning("Agent 4 missing clause — using default", extra={"clause_id": clause.clause_id})
+                action = "accept" if clause.risk_level == RiskLevel.GREEN else "negotiate"
+                advice_lookup[clause.clause_id] = {
                     "recommended_action": action,
                     "pushback_rationale": None,
                     "alternative_wording": None,
                     "negotiation_tips": [],
-                })
+                }
 
-        raw["clauses"] = coerced
-
-        # Auto-generate top_risks if Claude didn't provide them
+        # Auto-generate top_risks if not provided
         if not raw.get("top_risks"):
             sorted_clauses = sorted(
                 [c for c in source.clauses if c.severity_score >= 5.0],
@@ -241,15 +161,12 @@ class NegotiatorAgent:
                 reverse=True,
             )[:5]
             raw["top_risks"] = [
-                f"{c.clause_type.value.replace('_', ' ').title()} clause — score {c.severity_score}/10"
+                f"{c.clause_type.value.replace('_', ' ').title()} clause — {c.severity_score}/10"
                 for c in sorted_clauses
             ]
 
-        try:
-            return NegotiationAdvisorOutput(**raw)
-        except ValidationError as exc:
-            logger.error("Agent 4 Pydantic validation failed", extra={"errors": exc.errors()})
-            raise
+        raw["negotiation_advice"] = advice_lookup
+        return raw
 
     async def run(self, reasoner_output: LegalReasonerOutput) -> NegotiationAdvisorOutput:
         if not reasoner_output.clauses:
@@ -269,7 +186,43 @@ class NegotiatorAgent:
             system_prompt=_SYSTEM_PROMPT,
         )
 
-        result = self._parse_response(raw, reasoner_output)
+        parsed = self._parse_response(raw, reasoner_output)
+        advice_lookup = parsed["negotiation_advice"]
+
+        # Merge Agent 3 full clause data with Agent 4 additions
+        final_clauses = []
+        for clause in reasoner_output.clauses:
+            adv = advice_lookup.get(clause.clause_id, {})
+            final_clauses.append(NegotiationAdvice(
+                clause_id=clause.clause_id,
+                clause_type=clause.clause_type,
+                original_text=clause.original_text,
+                is_ambiguous=clause.is_ambiguous,
+                ambiguity_note=clause.ambiguity_note,
+                contradicts_clause_ids=clause.contradicts_clause_ids,
+                severity_score=clause.severity_score,
+                risk_level=clause.risk_level,
+                risk_category=clause.risk_category,
+                benchmark_comparison=clause.benchmark_comparison,
+                is_predatory=clause.is_predatory,
+                plain_language_explanation=clause.plain_language_explanation,
+                scenario_consequence=clause.scenario_consequence,
+                key_implications=clause.key_implications,
+                recommended_action=adv.get("recommended_action", "accept"),
+                pushback_rationale=adv.get("pushback_rationale"),
+                alternative_wording=adv.get("alternative_wording"),
+                negotiation_tips=adv.get("negotiation_tips", []),
+            ))
+
+        result = NegotiationAdvisorOutput(
+            clauses=final_clauses,
+            overall_score=parsed["overall_score"],
+            red_count=0, yellow_count=0, green_count=0,
+            document_type=reasoner_output.document_type,
+            executive_summary=parsed["executive_summary"],
+            top_risks=parsed["top_risks"],
+        )
+
         logger.info(
             "Agent 4 complete",
             extra={"red": result.red_count, "yellow": result.yellow_count, "green": result.green_count},

@@ -39,7 +39,7 @@ import tenacity
 
 logger = logging.getLogger(__name__)
 
-CALL_TIMEOUT_SECONDS: int = 120
+CALL_TIMEOUT_SECONDS: int = 180  # Agent 4 with 6+ clauses + full alt wording can take >120s
 _MAX_ATTEMPTS: int = 3
 _BACKOFF_MIN: float = 2.0
 _BACKOFF_MAX: float = 30.0

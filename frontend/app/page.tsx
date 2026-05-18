@@ -134,9 +134,10 @@ export default function Home() {
       setResult(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      // Surface the backend URL in dev so misconfiguration is obvious
-      const hint = backendUrl === "http://localhost:8000"
-        ? " (NEXT_PUBLIC_API_URL is not set — backend URL defaulted to localhost)"
+      // Only show "not set" tip when env var is genuinely missing (undefined),
+      // not when it's explicitly set to localhost for local development.
+      const hint = !process.env.NEXT_PUBLIC_API_URL
+        ? " — Tip: make sure NEXT_PUBLIC_API_URL is set in frontend/.env.local and the backend is running on port 8000"
         : ` (calling ${backendUrl})`;
       setError(msg + hint);
     } finally {
