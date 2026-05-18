@@ -1,209 +1,141 @@
 """
-embeddings.py — Local sentence-transformers embeddings + ChromaDB storage.
+embeddings.py — In-memory TF-IDF benchmark similarity for LEXGUARD.
 
-Design decisions:
-  - SentenceTransformer('all-MiniLM-L6-v2') — 384-dim, ~90MB, fast CPU inference,
-    no API key or network calls after first model download. Downloaded once to
-    ~/.cache/huggingface/hub/ and cached permanently.
-  - ChromaDB PersistentClient stores embeddings between restarts — benchmarks
-    are ingested once, subsequent starts use the cached vectors.
-  - No Google Cloud, Vertex AI, or any credentials required.
-  - Model loaded lazily at first embed call — init is instant even without network.
-  - Embedding calls are synchronous (sentence-transformers runs on CPU/MPS locally);
-    wrapped in asyncio.to_thread where called from async routes.
+Replaces the previous sentence-transformers + ChromaDB approach.
+Motivation: sentence-transformers requires torch (~500MB RAM), which exceeds
+Railway's free-tier memory limit. TF-IDF via scikit-learn achieves the same
+benchmark comparison goal with ~15MB RAM and zero network calls.
 
-Env vars:
-  CHROMA_DB_PATH — directory for ChromaDB storage (default: ./chroma_db)
+TF-IDF is adequate for comparing a clause against 21 hardcoded benchmark
+clauses — the corpus is tiny and the differences between clause types are
+large enough that TF-IDF similarity is a reliable signal.
 
-Common failure points:
-  - First run downloads model (~90MB) — can fail on no-network environments.
-    Subsequent runs use cached model regardless of network.
-  - ChromaDB directory not writable → PermissionError at init.
-  - Empty text passed to embed → raises ValueError before encoding.
+No credentials, no file system, no model downloads required.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from typing import Any, List
+from typing import Any, List, Optional
+
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[import-untyped]
+from sklearn.metrics.pairwise import cosine_similarity  # type: ignore[import-untyped]
 
 from core.benchmarks import BENCHMARKS
 
 logger = logging.getLogger(__name__)
 
-COLLECTION_NAME: str = "legal_benchmarks"
-EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
 DEFAULT_N_RESULTS: int = 3
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EmbeddingsStore
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 class EmbeddingsStore:
     """
-    Local embedding store using sentence-transformers + ChromaDB.
+    In-memory benchmark similarity search using TF-IDF cosine similarity.
 
     Usage:
         store = EmbeddingsStore()
-        store.ingest_benchmarks()               # idempotent
-        results = await store.find_similar(text, n_results=3)
+        store.ingest_benchmarks()               # fits vectorizer on corpus
+        results = await store.find_similar(clause_text, n_results=3)
     """
 
-    def __init__(self, chroma_db_path: str | None = None) -> None:
-        self._chroma_path = chroma_db_path or os.getenv("CHROMA_DB_PATH", "./chroma_db")
-        self._model = self._load_model()
-        self._collection = self._init_chroma()
+    def __init__(self) -> None:
+        self._benchmarks = list(BENCHMARKS)
+        self._vectorizer: Optional[TfidfVectorizer] = None
+        self._benchmark_matrix = None  # sparse matrix after fit
+        self._fitted = False
 
         logger.info(
             "EmbeddingsStore initialised",
-            extra={"model": EMBEDDING_MODEL_NAME, "chroma_path": self._chroma_path},
+            extra={"benchmark_count": len(self._benchmarks)},
         )
-
-    def _load_model(self):  # type: ignore[return]
-        """Load SentenceTransformer model — separated for easy mocking in tests."""
-        from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
-        return SentenceTransformer(EMBEDDING_MODEL_NAME)
-
-    def _init_chroma(self):  # type: ignore[return]
-        """Create or open ChromaDB persistent collection."""
-        import chromadb  # type: ignore[import-untyped]
-        client = chromadb.PersistentClient(path=self._chroma_path)
-        return client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
-
-    # ── Embedding computation ─────────────────────────────────────────────────
-
-    def _embed_texts_sync(self, texts: List[str]) -> List[List[float]]:
-        """
-        Embed a list of texts using the local sentence-transformers model.
-
-        Raises:
-            ValueError: If any text is empty or whitespace-only.
-        """
-        if not texts:
-            return []
-        if any(not t.strip() for t in texts):
-            raise ValueError("Cannot embed empty or whitespace-only text.")
-
-        embeddings = self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-        return embeddings.tolist()
-
-    def _embed_query_sync(self, text: str) -> List[float]:
-        """Embed a single query string."""
-        if not text.strip():
-            raise ValueError("Cannot embed empty query text.")
-        embedding = self._model.encode([text], convert_to_numpy=True, show_progress_bar=False)
-        return embedding[0].tolist()
-
-    # ── Benchmark ingestion ───────────────────────────────────────────────────
 
     def ingest_benchmarks(self) -> int:
         """
-        Load BENCHMARKS into ChromaDB. Idempotent — skips already-stored IDs.
+        Fit the TF-IDF vectorizer on the benchmark corpus.
 
         Returns:
-            Number of benchmarks newly ingested (0 if all already present).
+            Number of benchmarks (always len(BENCHMARKS) on first call, 0 on repeat).
         """
-        existing_ids: set[str] = set()
-        try:
-            existing = self._collection.get()
-            existing_ids = set(existing.get("ids", []))
-        except Exception as exc:
-            logger.warning("Failed to fetch existing IDs", extra={"error": str(exc)})
-
-        to_ingest = [b for b in BENCHMARKS if b["benchmark_id"] not in existing_ids]
-
-        if not to_ingest:
-            logger.info("All benchmarks already in ChromaDB — skipping")
+        if self._fitted:
+            logger.info("Benchmarks already fitted — skipping")
             return 0
 
-        texts = [b["text"] for b in to_ingest]
-        embeddings = self._embed_texts_sync(texts)
-
-        self._collection.add(
-            ids=[b["benchmark_id"] for b in to_ingest],
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=[
-                {
-                    "clause_type": b["clause_type"],
-                    "is_predatory": str(b["is_predatory"]),
-                    "risk_level": b["risk_level"],
-                    "severity_score": str(b["severity_score"]),
-                    "notes": b["notes"],
-                }
-                for b in to_ingest
-            ],
+        texts = [b["text"] for b in self._benchmarks]
+        self._vectorizer = TfidfVectorizer(
+            max_features=512,
+            stop_words="english",
+            ngram_range=(1, 2),  # unigrams + bigrams for better legal text matching
         )
+        self._benchmark_matrix = self._vectorizer.fit_transform(texts)
+        self._fitted = True
 
-        logger.info("Benchmarks ingested", extra={"count": len(to_ingest)})
-        return len(to_ingest)
+        logger.info("Benchmarks fitted", extra={"count": len(texts)})
+        return len(texts)
 
-    # ── Similarity search ─────────────────────────────────────────────────────
+    def get_collection_count(self) -> int:
+        return len(self._benchmarks)
 
     def _find_similar_sync(
         self,
         clause_text: str,
-        clause_type: str | None = None,
+        clause_type: Optional[str] = None,
         n_results: int = DEFAULT_N_RESULTS,
     ) -> List[dict[str, Any]]:
-        """Find most semantically similar benchmark clauses via ChromaDB."""
-        query_embedding = self._embed_query_sync(clause_text)
+        """
+        Find the most similar benchmarks using TF-IDF cosine similarity.
 
-        total = self._collection.count()
-        if total == 0:
-            logger.warning("ChromaDB collection is empty")
+        Args:
+            clause_text:  The extracted clause text to compare.
+            clause_type:  Optional filter — if set, only returns benchmarks of
+                          this clause type. Falls back to cross-type search if
+                          no matches found within the type.
+            n_results:    Maximum number of results to return.
+
+        Returns:
+            List of dicts with benchmark metadata and distance score.
+        """
+        if not clause_text.strip():
+            raise ValueError("Cannot search with empty clause text.")
+
+        if not self._fitted or self._vectorizer is None:
+            logger.warning("Vectorizer not fitted — call ingest_benchmarks() first")
             return []
 
-        clamped = min(n_results, total)
-        where = {"clause_type": clause_type} if clause_type else None
+        query_vec = self._vectorizer.transform([clause_text])
+        similarities = cosine_similarity(query_vec, self._benchmark_matrix)[0]
 
-        try:
-            results = self._collection.query(
-                query_embeddings=[query_embedding],
-                n_results=clamped,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            )
-        except Exception as exc:
-            logger.warning("ChromaDB query failed", extra={"error": str(exc)})
-            return []
+        # Sort by descending similarity
+        ranked_indices = similarities.argsort()[::-1]
 
-        output: List[dict[str, Any]] = []
-        ids = results.get("ids", [[]])[0]
-        docs = results.get("documents", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-
-        for idx, (doc, meta, dist) in enumerate(zip(docs, metas, dists)):
-            output.append({
-                "benchmark_id": ids[idx] if idx < len(ids) else "",
-                "text": doc,
-                "clause_type": meta.get("clause_type", ""),
-                "is_predatory": meta.get("is_predatory", "False") == "True",
-                "risk_level": meta.get("risk_level", "GREEN"),
-                "severity_score": float(meta.get("severity_score", "2.0")),
-                "notes": meta.get("notes", ""),
-                "distance": dist,
+        results: List[dict[str, Any]] = []
+        for idx in ranked_indices:
+            b = self._benchmarks[int(idx)]
+            # If clause_type filter set, skip non-matching types (but don't starve)
+            if clause_type and b["clause_type"] != clause_type and len(results) > 0:
+                continue
+            results.append({
+                "benchmark_id": b["benchmark_id"],
+                "text": b["text"],
+                "clause_type": b["clause_type"],
+                "is_predatory": b["is_predatory"],
+                "risk_level": b["risk_level"],
+                "severity_score": b["severity_score"],
+                "notes": b["notes"],
+                "distance": float(1.0 - similarities[int(idx)]),
             })
+            if len(results) >= n_results:
+                break
 
-        return output
+        return results
 
     async def find_similar(
         self,
         clause_text: str,
-        clause_type: str | None = None,
+        clause_type: Optional[str] = None,
         n_results: int = DEFAULT_N_RESULTS,
     ) -> List[dict[str, Any]]:
-        """Async wrapper — runs embedding + ChromaDB query in a thread."""
+        """Async wrapper — runs TF-IDF search in a thread to keep event loop free."""
         return await asyncio.to_thread(
             self._find_similar_sync, clause_text, clause_type, n_results
         )
-
-    def get_collection_count(self) -> int:
-        return self._collection.count()

@@ -44,8 +44,8 @@ _MAX_ATTEMPTS: int = 3
 _BACKOFF_MIN: float = 2.0
 _BACKOFF_MAX: float = 30.0
 
-# Max tokens for structured JSON output (enough for 30+ clauses)
-MAX_TOKENS_JSON: int = 4096
+# Max tokens — negotiator output for 5+ complex clauses needs 7000+ tokens
+MAX_TOKENS_JSON: int = 8192
 MAX_TOKENS_TEXT: int = 2048
 
 

@@ -107,6 +107,12 @@ export default function Home() {
 
   const analyze = async () => {
     if (!file) return;
+
+    // NEXT_PUBLIC_API_URL is baked into the client bundle at build time.
+    // In production: set this in your hosting platform before deploying.
+    // Locally: set it in frontend/.env.local
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
     setLoading(true);
     setError(null);
     setResult(null);
@@ -115,7 +121,11 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      const res = await fetch("/api/analyze", { method: "POST", body: formData });
+      const res = await fetch(`${backendUrl}/analyze`, {
+        method: "POST",
+        body: formData,
+        // No Authorization header — CORS credentials not needed
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail ?? `Server error ${res.status}`);
@@ -123,7 +133,12 @@ export default function Home() {
       const data: AnalyzeResponse = await res.json();
       setResult(data);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Unexpected error — check the backend is running.");
+      const msg = e instanceof Error ? e.message : String(e);
+      // Surface the backend URL in dev so misconfiguration is obvious
+      const hint = backendUrl === "http://localhost:8000"
+        ? " (NEXT_PUBLIC_API_URL is not set — backend URL defaulted to localhost)"
+        : ` (calling ${backendUrl})`;
+      setError(msg + hint);
     } finally {
       setLoading(false);
     }

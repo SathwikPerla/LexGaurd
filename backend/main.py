@@ -65,9 +65,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # LLMClient validates ANTHROPIC_API_KEY — raises LLMConfigurationError if missing
         app.state.llm_client = LLMClient()
 
-        # EmbeddingsStore loads sentence-transformers model (CPU, ~2-5s first time)
-        app.state.embeddings_store = await asyncio.to_thread(EmbeddingsStore)
-        await asyncio.to_thread(app.state.embeddings_store.ingest_benchmarks)
+        # EmbeddingsStore fits TF-IDF on 21 benchmark clauses (instant, in-memory)
+        app.state.embeddings_store = EmbeddingsStore()
+        app.state.embeddings_store.ingest_benchmarks()
 
         app.state.pipeline_ready = True
         logger.info(
@@ -99,10 +99,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    # Open CORS — this API is public, no auth cookies used.
+    # allow_credentials=False is required when allow_origins=["*"] per CORS spec.
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
