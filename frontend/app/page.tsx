@@ -108,11 +108,6 @@ export default function Home() {
   const analyze = async () => {
     if (!file) return;
 
-    // NEXT_PUBLIC_API_URL is baked into the client bundle at build time.
-    // In production: set this in your hosting platform before deploying.
-    // Locally: set it in frontend/.env.local
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
     setLoading(true);
     setError(null);
     setResult(null);
@@ -121,10 +116,12 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      const res = await fetch(`${backendUrl}/analyze`, {
+      // Call /api/analyze — a same-origin URL. Next.js rewrites it server-side
+      // to the backend (configured via BACKEND_URL in next.config.mjs).
+      // Same-origin = no CORS, no IPv6/IPv4 conflicts, works in all browsers.
+      const res = await fetch("/api/analyze", {
         method: "POST",
         body: formData,
-        // No Authorization header — CORS credentials not needed
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -134,12 +131,7 @@ export default function Home() {
       setResult(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      // Only show "not set" tip when env var is genuinely missing (undefined),
-      // not when it's explicitly set to localhost for local development.
-      const hint = !process.env.NEXT_PUBLIC_API_URL
-        ? " — Tip: make sure NEXT_PUBLIC_API_URL is set in frontend/.env.local and the backend is running on port 8000"
-        : ` (calling ${backendUrl})`;
-      setError(msg + hint);
+      setError(msg + " — make sure the backend is running: uvicorn main:app --host 0.0.0.0 --port 8000");
     } finally {
       setLoading(false);
     }
@@ -173,27 +165,29 @@ export default function Home() {
       {/* Upload zone */}
       {!result && (
         <section aria-label="Document upload">
-          <div
-            role="button"
-            tabIndex={0}
-            aria-label="Upload PDF or DOCX contract"
+
+          {/* The label wraps the hidden input — clicking anywhere inside opens
+              the file picker natively without needing JS .click(). This is
+              the most browser-compatible approach and works on mobile too. */}
+          <label
+            htmlFor="contract-file-input"
             onDrop={onDrop}
             onDragOver={onDragOver}
             onDragLeave={onDragLeave}
-            onClick={() => inputRef.current?.click()}
-            onKeyDown={(e) => e.key === "Enter" && inputRef.current?.click()}
             style={{
-              border: `2px dashed ${dragging ? "#7c8cf8" : file ? "#66bb6a" : "#374151"}`,
+              display: "block",
+              border: `2px dashed ${dragging ? "#7c8cf8" : file ? "#66bb6a" : "#4f46e5"}`,
               borderRadius: 16,
-              padding: "48px 24px",
+              padding: "40px 24px",
               textAlign: "center",
               cursor: "pointer",
-              background: dragging ? "#1a1d2e" : "#161b27",
+              background: dragging ? "#1a1d2e" : file ? "#0d1f0d" : "#161b27",
               transition: "all 0.2s",
               marginBottom: 16,
             }}
           >
             <input
+              id="contract-file-input"
               ref={inputRef}
               type="file"
               accept=".pdf,.docx,.doc"
@@ -201,27 +195,41 @@ export default function Home() {
               onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
               aria-label="Select PDF or DOCX file"
             />
-            <div style={{ fontSize: 48, marginBottom: 12 }}>📄</div>
+
             {file ? (
               <>
+                <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
                 <p style={{ color: "#66bb6a", fontWeight: 700, fontSize: 18, margin: "0 0 4px" }}>
                   {file.name}
                 </p>
-                <p style={{ color: "#9ca3af", fontSize: 14, margin: 0 }}>
-                  {(file.size / 1024).toFixed(1)} KB — click to change
+                <p style={{ color: "#9ca3af", fontSize: 13, margin: "0 0 12px" }}>
+                  {(file.size / 1024).toFixed(1)} KB · click to change
                 </p>
               </>
             ) : (
               <>
-                <p style={{ color: "#e8eaf6", fontWeight: 600, fontSize: 18, margin: "0 0 4px" }}>
-                  Drop your contract here or click to upload
+                <div style={{ fontSize: 40, marginBottom: 12 }}>📂</div>
+                <p style={{ color: "#e8eaf6", fontWeight: 700, fontSize: 18, margin: "0 0 6px" }}>
+                  Click here to choose your contract
                 </p>
-                <p style={{ color: "#6b7280", fontSize: 14, margin: 0 }}>
-                  PDF or DOCX · Max 15 MB
+                <p style={{ color: "#6b7280", fontSize: 13, margin: "0 0 16px" }}>
+                  or drag and drop · PDF or DOCX · Max 15 MB
                 </p>
+                <span style={{
+                  display: "inline-block",
+                  background: "#4f46e5",
+                  color: "#fff",
+                  padding: "10px 24px",
+                  borderRadius: 8,
+                  fontWeight: 600,
+                  fontSize: 14,
+                  pointerEvents: "none",
+                }}>
+                  Browse files
+                </span>
               </>
             )}
-          </div>
+          </label>
 
           {error && (
             <div role="alert" style={{ background: "#3d1a1a", border: "1px solid #ef5350", borderRadius: 8, padding: "12px 16px", color: "#ffcdd2", marginBottom: 16 }}>
@@ -229,29 +237,34 @@ export default function Home() {
             </div>
           )}
 
+          {/* Analyze button — always visible, state communicates next step */}
           <button
-            onClick={analyze}
+            onClick={file && !loading ? analyze : undefined}
             disabled={!file || loading}
-            aria-label="Analyze contract"
+            aria-label={file ? "Analyze contract" : "Select a file first"}
             style={{
               width: "100%",
               padding: "16px",
               borderRadius: 12,
               border: "none",
-              background: file && !loading ? "#7c8cf8" : "#374151",
-              color: file && !loading ? "#fff" : "#6b7280",
+              background: file && !loading ? "#7c8cf8" : "#1f2937",
+              color: file && !loading ? "#fff" : "#4b5563",
               fontSize: 16,
               fontWeight: 700,
-              cursor: file && !loading ? "pointer" : "not-allowed",
-              transition: "background 0.2s",
+              cursor: file && !loading ? "pointer" : "default",
+              transition: "all 0.2s",
             }}
           >
-            {loading ? "Analyzing with AI agents…" : "Analyze Contract"}
+            {loading
+              ? "⏳ Analyzing with 4 AI agents…"
+              : file
+              ? "→ Analyze Contract"
+              : "↑ Select a file above to begin"}
           </button>
 
           {loading && (
-            <p role="status" aria-live="polite" style={{ textAlign: "center", color: "#9ca3af", marginTop: 16, fontSize: 14 }}>
-              Running 4-agent AI pipeline · This takes 20–60 seconds…
+            <p role="status" aria-live="polite" style={{ textAlign: "center", color: "#9ca3af", marginTop: 16, fontSize: 13 }}>
+              Running 4-agent AI pipeline — takes 60–120 seconds for a full contract
             </p>
           )}
         </section>
