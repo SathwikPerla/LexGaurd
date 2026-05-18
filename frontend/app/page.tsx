@@ -130,8 +130,7 @@ export default function Home() {
       const data: AnalyzeResponse = await res.json();
       setResult(data);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg + " — make sure the backend is running: uvicorn main:app --host 0.0.0.0 --port 8000");
+      setError(e instanceof Error ? e.message : "Unexpected error — check the browser console.");
     } finally {
       setLoading(false);
     }
