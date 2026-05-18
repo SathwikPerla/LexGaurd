@@ -283,14 +283,34 @@ async def analyze_endpoint(
 
     # Import here to allow tests to patch core.graph.run_pipeline cleanly
     from core.graph import run_pipeline
+    from core.gemini_client import LLMCallError, LLMParseError
 
-    response = await run_pipeline(
-        document_text=result["extracted_text"],
-        filename=file.filename or "document",
-        parse_method=result["parse_method"],
-        llm_client=request.app.state.llm_client,
-        embeddings_store=request.app.state.embeddings_store,
-    )
+    try:
+        response = await run_pipeline(
+            document_text=result["extracted_text"],
+            filename=file.filename or "document",
+            parse_method=result["parse_method"],
+            llm_client=request.app.state.llm_client,
+            embeddings_store=request.app.state.embeddings_store,
+        )
+    except LLMParseError as exc:
+        logger.error("LLM returned invalid JSON", extra={"request_id": request_id, "error": str(exc)})
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"AI response parsing failed: {str(exc)[:300]}")
+    except LLMCallError as exc:
+        logger.error("LLM API call failed", extra={"request_id": request_id, "error": str(exc)})
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"AI API call failed: {str(exc)[:300]}")
+    except asyncio.TimeoutError:
+        logger.error("Pipeline timed out", extra={"request_id": request_id})
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="Analysis timed out after 3 minutes. Try a shorter document.")
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("Pipeline error", extra={"request_id": request_id, "error": str(exc), "traceback": tb})
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Pipeline error: {type(exc).__name__}: {str(exc)[:300]}")
 
     logger.info(
         "Analysis complete",
