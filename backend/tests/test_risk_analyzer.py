@@ -14,13 +14,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agents.risk_analyzer import RiskAnalyzerAgent
 from models.schemas import (
-    ClauseType,
     ExtractedClause,
     ExtractorOutput,
     RiskAnalyzerOutput,

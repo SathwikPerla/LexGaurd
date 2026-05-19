@@ -21,14 +21,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import ValidationError
 
-from core.gemini_client import LLMClient, LLMCallError, LLMParseError
+from core.gemini_client import LLMClient
 from models.schemas import (
     LegalReasonerOutput,
     NegotiationAdvice,
     NegotiationAdvisorOutput,
-    RecommendedAction,
     RiskLevel,
 )
 

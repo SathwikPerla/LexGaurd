@@ -18,7 +18,6 @@ import asyncio
 import logging
 from typing import Any, List, Optional
 
-import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore[import-untyped]
 from sklearn.metrics.pairwise import cosine_similarity  # type: ignore[import-untyped]
 

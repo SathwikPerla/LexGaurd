@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.document_parser import MAX_CHARS, _clean_text, parse_document
+from core.document_parser import _clean_text, parse_document
 
 
 # ── Test helpers ──────────────────────────────────────────────────────────────

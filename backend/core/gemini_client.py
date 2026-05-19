@@ -32,7 +32,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from typing import Any
 
 import tenacity
@@ -240,7 +239,6 @@ class LLMClient:
         processes multiple documents, the system prompt is served from cache
         after the first call (saves ~90% of input token cost for that portion).
         """
-        import anthropic  # type: ignore[import-untyped]
 
         @tenacity.retry(
             stop=tenacity.stop_after_attempt(_MAX_ATTEMPTS),
@@ -292,7 +290,6 @@ class LLMClient:
 
     def _call_text_sync(self, system_prompt: str, user_prompt: str) -> str:
         """Synchronous Claude call returning plain text."""
-        import anthropic  # type: ignore[import-untyped]
 
         @tenacity.retry(
             stop=tenacity.stop_after_attempt(_MAX_ATTEMPTS),

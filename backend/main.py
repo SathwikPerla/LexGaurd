@@ -17,13 +17,14 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from core.history import delete_analysis, get_analysis, init_db, list_analyses, save_analysis
 from core.logging_config import setup_logging
 from core.document_parser import parse_document
 from core.ocr_handler import ocr_pdf_bytes
@@ -56,6 +57,9 @@ ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".doc"})
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("LEXGUARD backend starting", extra={"max_file_mb": MAX_FILE_SIZE_MB})
+
+    # Initialise SQLite history database (creates file + table if needed)
+    init_db()
 
     # Import here to avoid circular import issues
     from core.gemini_client import LLMClient, LLMConfigurationError
@@ -324,7 +328,61 @@ async def analyze_endpoint(
         },
     )
 
+    # Persist to history — fire-and-forget, never block the response
+    client_id = request.headers.get("X-Client-ID", "anonymous")
+    try:
+        record_id = await asyncio.to_thread(
+            save_analysis, client_id, response.model_dump()
+        )
+        logger.info("History saved", extra={"record_id": record_id})
+    except Exception as exc:
+        logger.warning("History save failed", extra={"error": str(exc)})
+
     return response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get(
+    "/history",
+    status_code=status.HTTP_200_OK,
+    tags=["History"],
+    summary="List past analyses for this browser session",
+)
+async def list_history(request: Request) -> List[Any]:
+    client_id = request.headers.get("X-Client-ID", "anonymous")
+    return await asyncio.to_thread(list_analyses, client_id)
+
+
+@app.get(
+    "/history/{record_id}",
+    status_code=status.HTTP_200_OK,
+    tags=["History"],
+    summary="Get a full past analysis by ID",
+)
+async def get_history_item(record_id: str, request: Request) -> Any:
+    client_id = request.headers.get("X-Client-ID", "anonymous")
+    data = await asyncio.to_thread(get_analysis, record_id, client_id)
+    if data is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found.")
+    return data
+
+
+@app.delete(
+    "/history/{record_id}",
+    status_code=status.HTTP_200_OK,
+    tags=["History"],
+    summary="Delete a past analysis",
+)
+async def delete_history_item(record_id: str, request: Request) -> Any:
+    client_id = request.headers.get("X-Client-ID", "anonymous")
+    deleted = await asyncio.to_thread(delete_analysis, record_id, client_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found.")
+    return {"deleted": record_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

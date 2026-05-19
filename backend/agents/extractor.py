@@ -36,12 +36,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from core.gemini_client import LLMClient, LLMCallError, LLMParseError
-# Aliases for backward compatibility within this module
+from core.gemini_client import LLMCallError, LLMParseError, LLMClient
+from models.schemas import ExtractorOutput
+
+# Backward-compat aliases (tests import these names)
 GeminiClient = LLMClient
 GeminiCallError = LLMCallError
 GeminiParseError = LLMParseError
-from models.schemas import ClauseType, ExtractorOutput
 
 logger = logging.getLogger(__name__)
 

@@ -15,13 +15,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from core.gemini_client import LLMClient, LLMCallError, LLMParseError
+from core.gemini_client import LLMClient
 from models.schemas import (
     LegalReasonerOutput,
     ReasonedClause,
     RiskAnalyzerOutput,
-    RiskLevel,
-    score_to_label,
 )
 
 logger = logging.getLogger(__name__)

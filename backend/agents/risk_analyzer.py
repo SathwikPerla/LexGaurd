@@ -39,22 +39,18 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from agents.extractor import ExtractorAgent
-from core.gemini_client import LLMClient, LLMCallError, LLMParseError
-# Aliases for backward compatibility within this module
-GeminiClient = LLMClient
-GeminiCallError = LLMCallError
-GeminiParseError = LLMParseError
 from core.embeddings import EmbeddingsStore
+from core.gemini_client import LLMCallError, LLMParseError, LLMClient
 from models.schemas import (
-    ClauseType,
     ExtractorOutput,
     RiskAnalyzerOutput,
     RiskCategory,
-    RiskLevel,
-    RiskScoredClause,
-    score_to_label,
 )
+
+# Backward-compat aliases
+GeminiClient = LLMClient
+GeminiCallError = LLMCallError
+GeminiParseError = LLMParseError
 
 logger = logging.getLogger(__name__)
 
