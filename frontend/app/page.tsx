@@ -87,10 +87,23 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [isPrinting, setIsPrinting] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // ── Expand all clauses before print, restore after ────────────────────
+  useEffect(() => {
+    const onBefore = () => setIsPrinting(true);
+    const onAfter  = () => setIsPrinting(false);
+    window.addEventListener("beforeprint", onBefore);
+    window.addEventListener("afterprint",  onAfter);
+    return () => {
+      window.removeEventListener("beforeprint", onBefore);
+      window.removeEventListener("afterprint",  onAfter);
+    };
+  }, []);
 
   // ── Load history on mount ──────────────────────────────────────────────
 
@@ -181,7 +194,12 @@ export default function Home() {
 
   // ── Download report ────────────────────────────────────────────────────
 
-  const downloadReport = () => window.print();
+  const downloadReport = () => {
+    // beforeprint event sets isPrinting=true which expands all clauses.
+    // Small timeout lets React re-render before the print dialog opens.
+    setIsPrinting(true);
+    setTimeout(() => { window.print(); }, 150);
+  };
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -198,19 +216,62 @@ export default function Home() {
 
   return (
     <>
-      {/* ── Print stylesheet — only visible when printing ── */}
+      {/* ── Styles ── */}
       <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr !important; } }
+
         @media print {
-          .no-print { display: none !important; }
-          .print-break { page-break-after: always; }
-          body { background: white !important; color: black !important; font-family: serif; }
-          main { max-width: 100% !important; padding: 0 !important; }
-          article { border: 1px solid #ccc !important; background: white !important;
-                    break-inside: avoid; margin-bottom: 12px; }
-          button { display: none !important; }
-        }
-        @media (max-width: 640px) {
-          .grid-2 { grid-template-columns: 1fr !important; }
+          /* Hide interactive chrome */
+          .no-print, button, input, label[for="contract-file-input"] { display: none !important; }
+
+          /* Reset to readable black-on-white */
+          body, main { background: #fff !important; color: #111 !important;
+            font-family: Georgia, serif; font-size: 11pt; }
+          main { max-width: 100% !important; padding: 0.4in !important; }
+
+          /* Page header */
+          h1 { color: #1e1b4b !important; font-size: 18pt !important; }
+          h2 { font-size: 13pt !important; color: #111 !important; margin-top: 18pt; }
+
+          /* Score card */
+          div[style*="text-align: center"] { border: 2px solid #333 !important;
+            background: #fff !important; padding: 12pt !important; margin-bottom: 14pt; }
+
+          /* Clause cards — force visible, avoid splitting across pages */
+          article { border: 1px solid #aaa !important; background: #fff !important;
+            break-inside: avoid; page-break-inside: avoid;
+            margin-bottom: 10pt; padding: 8pt 10pt; }
+
+          /* Clause header button text — keep visible */
+          article button { display: block !important; font-weight: bold !important;
+            font-size: 10pt !important; color: #111 !important;
+            background: none !important; border: none !important;
+            padding: 0 !important; text-align: left !important; width: 100%; }
+
+          /* Detail sections */
+          article div[style*="padding: \"0 18px 18px\""] { display: block !important; }
+          blockquote { border-left: 3px solid #666 !important; background: #f5f5f5 !important;
+            color: #333 !important; padding: 6pt 10pt !important; font-size: 9pt !important; }
+
+          /* Info blocks */
+          div[style*="background: \"#0f1117\""] { background: #f0f0f0 !important;
+            border: 1px solid #ccc !important; color: #111 !important; }
+
+          /* Alternative wording */
+          div[style*="background: \"#0f2414\""] { background: #edfaed !important;
+            border: 1px solid #4caf50 !important; color: #111 !important; }
+
+          /* Risk badges — keep colour as background but use dark text */
+          span[style*="color: \"#000\""] { -webkit-print-color-adjust: exact;
+            print-color-adjust: exact; }
+
+          /* Footer */
+          footer { border: 1px solid #ccc !important; background: #fff !important;
+            color: #555 !important; font-size: 8pt !important; }
+
+          /* Force collapse arrows hidden in print */
+          span[style*="font-size: 11"] { display: none !important; }
         }
       `}</style>
 
@@ -427,7 +488,7 @@ export default function Home() {
             <div role="list" aria-label="Contract clauses">
               {result.report.clauses.map(clause => {
                 const c = riskColor(clause.risk_level);
-                const expanded = expandedId === clause.clause_id;
+                const expanded = isPrinting || expandedId === clause.clause_id;
                 return (
                   <article key={clause.clause_id} role="listitem"
                     aria-label={`${clause.clause_id}: ${clause.risk_label} risk, score ${clause.severity_score}`}
