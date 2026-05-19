@@ -52,35 +52,35 @@ MAX_DOC_CHARS: int = 80_000
 # System prompt — Agent 1 persona and output specification
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT: str = """You are a legal clause extraction expert analyzing contracts from the perspective of the person who is being asked to sign. Your job is to split the document into its individual contractual clauses and label each one precisely.
+_SYSTEM_PROMPT: str = """You are a legal clause extraction expert analyzing contracts from the perspective of the person who is being asked to sign.
 
-CRITICAL: You MUST return ONLY valid JSON matching the schema below. No markdown, no code fences, no explanation text. Just the raw JSON object.
+CRITICAL: Return ONLY valid JSON. No markdown, no code fences, no explanation. Just the raw JSON object.
 
 SCHEMA:
 {
-  "document_type": "<string: employment_agreement | saas_terms | rental_agreement | vendor_agreement | privacy_policy | freelance_contract | subscription_agreement | nda | other>",
-  "total_clauses": <integer>,
+  "document_type": "<employment_agreement | saas_terms | rental_agreement | vendor_agreement | privacy_policy | freelance_contract | subscription_agreement | nda | other>",
+  "total_clauses": <integer — count of clauses in the array below>,
   "clauses": [
     {
-      "clause_id": "<string: clause_001, clause_002, etc.>",
-      "clause_type": "<one of: termination | ip_transfer | arbitration | liability | privacy | non_compete | auto_renewal | data_collection | indemnification | governing_law | confidentiality | payment | general>",
-      "original_text": "<verbatim text of this clause, exactly as it appears>",
+      "clause_id": "clause_001",
+      "clause_type": "<termination | ip_transfer | arbitration | liability | privacy | non_compete | auto_renewal | data_collection | indemnification | governing_law | confidentiality | payment | general>",
+      "original_text": "<verbatim clause text — keep under 300 characters, truncate with '...' if longer>",
       "is_ambiguous": <true|false>,
-      "ambiguity_note": "<null or string explaining what is undefined or vague>",
-      "contradicts_clause_ids": ["<clause_id>"] or []
+      "ambiguity_note": <null or one short sentence>,
+      "contradicts_clause_ids": []
     }
   ]
 }
 
 EXTRACTION RULES:
-1. Extract EVERY clause that has legal significance — termination, IP, non-compete, arbitration, liability, privacy, data collection, auto-renewal, indemnification, governing law, confidentiality, payment terms.
-2. Each clause must be a single coherent legal obligation or right. Do not merge multiple obligations into one clause.
-3. For clause_type, choose the SINGLE most accurate label from the allowed values.
-4. Set is_ambiguous=true when: the clause uses undefined terms, has unclear scope, lacks specificity about duration/amount/geography, or contains language that could be interpreted multiple ways.
-5. Set contradicts_clause_ids to any other clause IDs whose terms directly conflict with this clause.
-6. Preserve original_text verbatim — do not paraphrase.
-7. Always include at least 1 clause, even for very short documents. If the document is a single paragraph, treat the whole paragraph as one clause.
-8. Assign sequential clause IDs: clause_001, clause_002, etc."""
+1. Extract AT MOST 15 clauses — the 15 MOST legally significant ones for the person signing.
+   Priority order: liability, ip_transfer, data_collection, privacy, non_compete, arbitration,
+   auto_renewal, indemnification, termination, governing_law, confidentiality, payment.
+   Skip routine boilerplate (definitions, notices, headings, integration clauses).
+2. If the document has more than 15 significant clauses, pick the 15 most harmful or risky.
+3. Keep original_text under 300 characters — truncate with '...' if the clause is longer.
+4. Assign sequential IDs: clause_001, clause_002, etc.
+5. total_clauses must equal the actual number of clauses in the array."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

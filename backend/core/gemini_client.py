@@ -103,12 +103,11 @@ def _extract_json(text: str) -> Any:
     Parse JSON from Claude's response text.
 
     Tries in order:
-      1. Direct JSON parse (ideal — Claude follows JSON instructions well)
-      2. Strip markdown fences by slicing from first newline to last fence
-      3. Find first { or [ and last matching } or ] and parse that substring
-
-    The regex-free approach in steps 2 and 3 handles arbitrarily large JSON
-    without regex backtracking issues on multi-kilobyte agent outputs.
+      1. Direct JSON parse
+      2. Strip markdown fences (```json ... ```)
+      3. Find first { or [ to last } or ]
+      4. Truncation recovery: if the JSON object starts but is cut off,
+         close all open arrays/objects and re-parse the salvaged prefix.
 
     Raises:
         LLMParseError if all attempts fail.
@@ -123,27 +122,65 @@ def _extract_json(text: str) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # 2. Strip markdown fences — handles ```json\n{...}\n``` of any size
+    # 2. Strip markdown fences
+    working = stripped
     if stripped.startswith("```"):
-        # Skip past the opening fence line (e.g. "```json\n")
         newline_pos = stripped.find("\n")
         if newline_pos != -1:
             inner = stripped[newline_pos + 1:]
-            # Remove trailing closing fence if present
             last_fence = inner.rfind("```")
-            content = inner[:last_fence].strip() if last_fence != -1 else inner.strip()
+            working = inner[:last_fence].strip() if last_fence != -1 else inner.strip()
             try:
-                return json.loads(content)
+                return json.loads(working)
             except json.JSONDecodeError:
                 pass
 
-    # 3. Find outermost JSON object or array
+    # 3. Find outermost { ... } or [ ... ]
     for open_c, close_c in [('{', '}'), ('[', ']')]:
-        start = stripped.find(open_c)
-        end = stripped.rfind(close_c)
+        start = working.find(open_c)
+        end = working.rfind(close_c)
         if start != -1 and end > start:
             try:
-                return json.loads(stripped[start:end + 1])
+                return json.loads(working[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    # 4. Truncation recovery — append missing closing brackets.
+    # When Claude hits the token limit mid-JSON (e.g. 47-clause documents),
+    # the output is valid JSON up to the cut point. We close all open
+    # brackets, strip any trailing comma, and parse the repaired string.
+    candidate = working if (working.startswith("{") or working.startswith("[")) else stripped
+    if candidate:
+        closers: list[str] = []
+        in_str = False
+        esc = False
+        for ch in candidate:
+            if esc:
+                esc = False
+                continue
+            if ch == '\\' and in_str:
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == '{':
+                closers.append('}')
+            elif ch == '[':
+                closers.append(']')
+            elif ch in ('}', ']') and closers:
+                closers.pop()
+
+        if closers:
+            # Strip trailing whitespace and dangling comma before closing
+            tail = candidate.rstrip()
+            if tail.endswith(','):
+                tail = tail[:-1]
+            repaired = tail + ''.join(reversed(closers))
+            try:
+                return json.loads(repaired)
             except json.JSONDecodeError:
                 pass
 
