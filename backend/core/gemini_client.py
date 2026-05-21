@@ -172,11 +172,15 @@ def _extract_json(text: str) -> Any:
             elif ch in ('}', ']') and closers:
                 closers.pop()
 
-        if closers:
-            # Strip trailing whitespace and dangling comma before closing
+        if closers or in_str:
             tail = candidate.rstrip()
-            if tail.endswith(','):
-                tail = tail[:-1]
+            # If truncated mid-string, close the open string literal first
+            if in_str:
+                tail = tail + '"'
+            # Strip dangling comma that would appear before a closing bracket
+            if tail.rstrip().endswith(','):
+                tail = tail.rstrip()[:-1]
+            # Append all unclosed brackets in reverse order
             repaired = tail + ''.join(reversed(closers))
             try:
                 return json.loads(repaired)

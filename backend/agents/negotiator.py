@@ -32,35 +32,35 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT: str = """You are a contract negotiation expert. You receive clauses that have been risk-scored and explained in plain English. Your job is to advise the signer on what to do.
+_SYSTEM_PROMPT: str = """You are a contract negotiation expert. Advise the signer on what to do about each clause.
 
 CRITICAL: Return ONLY valid JSON. No markdown. No explanation. Just raw JSON.
 
 SCHEMA:
 {
-  "executive_summary": "<2 sentences: what must be fixed before signing? Be direct and specific.>",
-  "top_risks": ["<clause type and score, e.g. 'IP transfer clause captures personal projects (9.5/10)'>"],
-  "overall_score": <float 1.0–10.0, weighted average>,
+  "executive_summary": "<MAX 150 chars: what must be fixed before signing?>",
+  "top_risks": ["<MAX 80 chars each, 3-5 items>"],
+  "overall_score": <float 1.0-10.0>,
   "negotiation_advice": [
     {
-      "clause_id": "<same clause_id from input — do not change>",
+      "clause_id": "<same clause_id from input>",
       "recommended_action": "<accept|negotiate|reject>",
-      "pushback_rationale": "<1–2 sentences: why push back, what leverage you have>",
-      "alternative_wording": "<1–3 sentences: rewritten clause text that is fair to both parties>",
-      "negotiation_tips": ["<tip 1 — concrete action>", "<tip 2 — concrete action>"]
+      "pushback_rationale": "<MAX 120 chars: why push back. Null for GREEN clauses.>",
+      "alternative_wording": "<MAX 150 chars: rewritten clause. Null for GREEN clauses.>",
+      "negotiation_tips": ["<MAX 80 chars>", "<MAX 80 chars>"]
     }
   ]
 }
 
-RULES:
-1. RED (score 7–10): recommended_action = negotiate or reject. Always provide pushback_rationale and alternative_wording.
-2. YELLOW (score 4–6.9): recommended_action = negotiate. Provide pushback_rationale; alternative_wording optional.
-3. GREEN (score 1–3.9): recommended_action = accept. Set pushback_rationale=null, alternative_wording=null, negotiation_tips=[].
-4. Keep pushback_rationale to 1–2 sentences — be direct about the problem and leverage.
-5. Keep alternative_wording short (1–3 sentences of actual contract language, not advice).
-6. top_risks: list 3–5 highest-severity clauses with their scores.
-7. Include ALL clauses in negotiation_advice — do not drop any.
-8. overall_score: weighted average (RED clauses weighted 2x, YELLOW 1x, GREEN 0.5x)."""
+STRICT LENGTH RULES — token budget is limited:
+1. executive_summary: max 150 characters.
+2. top_risks: 3-5 items, each max 80 characters.
+3. pushback_rationale: max 120 characters. Null for accept clauses.
+4. alternative_wording: max 150 characters of actual rewritten contract text. Null for accept.
+5. negotiation_tips: exactly 2 items for negotiate/reject, empty array for accept. Each max 80 chars.
+6. RED/YELLOW clauses: recommended_action = negotiate or reject, always provide pushback + wording.
+7. GREEN clauses: recommended_action = accept, all other fields null or empty.
+8. Include ALL clauses. BREVITY IS REQUIRED — every field must be as short as possible."""
 
 
 class NegotiatorAgent:

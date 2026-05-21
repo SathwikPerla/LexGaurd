@@ -24,29 +24,29 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT: str = """You are a legal communication expert. You receive risk-scored contract clauses and explain each one in plain language for a non-lawyer.
+_SYSTEM_PROMPT: str = """You are a legal communication expert. Explain contract clauses in plain language for a non-lawyer.
 
 CRITICAL: Return ONLY valid JSON. No markdown. No explanation. Just raw JSON.
 
 SCHEMA:
 {
-  "executive_summary": "<2 sentences: what are the 1-2 biggest risks in this contract? Be direct.>",
+  "executive_summary": "<MAX 120 chars: the 1-2 biggest risks. Be direct.>",
   "clause_explanations": [
     {
-      "clause_id": "<same clause_id from input — do not change>",
-      "plain_language_explanation": "<1-2 sentences: what does this clause actually mean for the person signing? No jargon.>",
-      "scenario_consequence": "<Start with 'If you sign this and': one concrete realistic scenario and its consequence for the signer.>",
-      "key_implications": ["<short implication 1>", "<short implication 2>"]
+      "clause_id": "<same clause_id from input>",
+      "plain_language_explanation": "<MAX 120 chars: what this clause does to the person signing. No jargon.>",
+      "scenario_consequence": "<MAX 120 chars: start with 'If you sign this and'. One concrete consequence.>",
+      "key_implications": ["<MAX 60 chars>", "<MAX 60 chars>"]
     }
   ]
 }
 
-RULES:
-1. plain_language_explanation: Write for someone with zero legal background. What does this do TO THEM?
-2. scenario_consequence: MUST start with "If you sign this and". One sentence. Make it concrete — mention money, job loss, lawsuits, specific consequences.
-3. key_implications: 2-3 short bullet points. Each is a distinct practical consequence.
-4. executive_summary: Lead with the worst risk. Be direct and actionable.
-5. Include ALL clauses in clause_explanations — do not drop any."""
+STRICT LENGTH RULES — token budget is limited:
+1. executive_summary: max 120 characters total.
+2. plain_language_explanation: max 120 characters. One sentence only.
+3. scenario_consequence: must start with "If you sign this and". Max 120 characters.
+4. key_implications: exactly 2 items. Each max 60 characters.
+5. Include ALL clauses. Keep every field SHORT — brevity is required."""
 
 
 class ReasonerAgent:
