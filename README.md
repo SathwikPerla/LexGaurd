@@ -4,7 +4,7 @@
 > LEXGUARD analyzes legal documents and tells you exactly what you're agreeing to — in plain English.
 
 ![LEXGUARD](https://img.shields.io/badge/Built%20For-PromptWars%202025-blue)
-![Stack](https://img.shields.io/badge/Stack-Next.js%20%2B%20FastAPI%20%2B%20Claude-api-green)
+![Stack](https://img.shields.io/badge/Stack-Next.js%20%2B%20FastAPI%20%2B%20Claudeapi-green)
 ![GCP](https://img.shields.io/badge/Deployed%20On-Google%20Cloud%20Run-orange)
 ![Tests](https://img.shields.io/badge/Tests-146%20Passing-brightgreen)
 
