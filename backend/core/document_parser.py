@@ -29,9 +29,10 @@ import io
 import logging
 import re
 from pathlib import Path
-from typing import Optional
 
+# pyrefly: ignore [missing-import]
 import fitz  # PyMuPDF — import name is 'fitz', package name is 'PyMuPDF'
+# pyrefly: ignore [missing-import]
 from docx import Document
 
 logger = logging.getLogger(__name__)

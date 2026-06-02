@@ -13,6 +13,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Optional
 
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field, model_validator
 
 

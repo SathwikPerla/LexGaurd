@@ -8,6 +8,7 @@ import io
 import sys
 from pathlib import Path
 
+# pyrefly: ignore [missing-import]
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -37,6 +38,7 @@ def make_pdf(text: str = "This is a test legal clause.") -> bytes:
 
 
 def make_docx(text: str = "This is a test legal clause.") -> bytes:
+    # pyrefly: ignore [missing-import]
     from docx import Document
     buf = io.BytesIO()
     doc = Document()
@@ -147,6 +149,7 @@ class TestParseDOCX:
 
     def test_multiple_paragraphs(self):
         buf = io.BytesIO()
+        # pyrefly: ignore [missing-import]
         from docx import Document
         doc = Document()
         doc.add_paragraph("Clause 1: Non-compete.")
@@ -158,6 +161,7 @@ class TestParseDOCX:
 
     def test_table_content_extracted(self):
         buf = io.BytesIO()
+        # pyrefly: ignore [missing-import]
         from docx import Document
         doc = Document()
         tbl = doc.add_table(rows=1, cols=2)

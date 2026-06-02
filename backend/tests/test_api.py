@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# pyrefly: ignore [missing-import]
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -124,6 +125,7 @@ def make_pdf(text: str = "Test legal clause.") -> bytes:
 
 
 def make_docx(text: str = "Test legal clause.") -> bytes:
+    # pyrefly: ignore [missing-import]
     from docx import Document
     buf = io.BytesIO()
     doc = Document()

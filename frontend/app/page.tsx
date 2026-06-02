@@ -480,9 +480,62 @@ export default function Home() {
               </div>
             </div>
 
+            {/* ── On-the-Go TL;DR ── */}
+            <div style={{ background: "#0d1117", border: "1px solid #374151", borderRadius: 16, padding: "24px", marginBottom: 32 }}>
+              <h2 style={{ fontSize: 20, fontWeight: 800, color: "#7c8cf8", margin: "0 0 16px", display: "flex", alignItems: "center", gap: 8 }}>
+                ⚡ On-the-Go Summary
+              </h2>
+              
+              {result.report.top_risks.length > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <h3 style={{ fontSize: 13, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 12 }}>
+                    🚨 Top Risks
+                  </h3>
+                  <ul style={{ margin: 0, paddingLeft: 20, color: "#fca5a5", fontSize: 14, lineHeight: 1.6 }}>
+                    {result.report.top_risks.map((risk, i) => (
+                      <li key={i} style={{ marginBottom: 6 }}>{risk}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <h3 style={{ fontSize: 13, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 12 }}>
+                🛑 Actionable Points (Read carefully)
+              </h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {result.report.clauses
+                  .filter(c => c.risk_level === "RED" || c.risk_level === "YELLOW")
+                  .map(clause => {
+                    const c = riskColor(clause.risk_level);
+                    return (
+                      <div key={clause.clause_id} style={{ background: "#161b27", borderLeft: `4px solid ${c.border}`, borderRadius: "0 8px 8px 0", padding: "12px 16px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                          <span style={{ background: c.badge, color: "#000", fontWeight: 800, padding: "2px 8px", borderRadius: 4, fontSize: 11 }}>
+                            {clause.risk_label}
+                          </span>
+                          <span style={{ color: "#9ca3af", fontSize: 12, fontWeight: 600 }}>{clause.clause_type.replace(/_/g, " ")}</span>
+                        </div>
+                        <p style={{ color: "#e8eaf6", fontSize: 14, margin: "0 0 8px", lineHeight: 1.5 }}>
+                          {clause.plain_language_explanation}
+                        </p>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ color: "#9ca3af", fontSize: 12 }}>Recommendation:</span>
+                          <span style={{ background: ACTION_COLORS[clause.recommended_action], color: "#000", fontWeight: 700, padding: "2px 10px", borderRadius: 5, fontSize: 11, textTransform: "uppercase" }}>
+                            {clause.recommended_action}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                })}
+                {result.report.clauses.filter(c => c.risk_level === "RED" || c.risk_level === "YELLOW").length === 0 && (
+                  <p style={{ color: "#66bb6a", fontSize: 14, margin: 0 }}>No high or medium risk clauses detected. You are good to go!</p>
+                )}
+              </div>
+            </div>
+
             {/* Clause cards */}
             <h2 style={{ fontSize: 16, fontWeight: 700, color: "#e8eaf6", margin: "0 0 14px" }}>
-              Clause-by-clause analysis ({result.report.clauses.length} clauses)
+              Detailed Clause-by-clause analysis ({result.report.clauses.length} clauses)
             </h2>
 
             <div role="list" aria-label="Contract clauses">
