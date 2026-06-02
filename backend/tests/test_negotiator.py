@@ -247,3 +247,82 @@ class TestErrorPropagation:
             asyncio.get_event_loop().run_until_complete(
                 agent.run(_make_reasoner_output())
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# overall_score pass-through — Agent 2 is the source of truth.
+# Regression test for the inversion bug: Agent 4 used to emit its own
+# free-form overall_score (a "contract quality" grade, higher=better), which
+# inverted the risk axis. Agent 4 must now pass Agent 2's score through
+# unchanged and ignore anything Claude returns.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _reasoner_output_with_score(overall_score: float, risk_level: RiskLevel) -> LegalReasonerOutput:
+    """A single-clause reasoner output carrying a known Agent-2 overall_score."""
+    label = RiskLabel.HIGH if risk_level == RiskLevel.RED else (
+        RiskLabel.MEDIUM if risk_level == RiskLevel.YELLOW else RiskLabel.LOW
+    )
+    clause = ReasonedClause(
+        clause_id="clause_001",
+        clause_type=ClauseType.NON_COMPETE,
+        original_text="Some clause text.",
+        severity_score=overall_score,
+        risk_level=risk_level,
+        risk_label=label,
+        risk_category=RiskCategory.EMPLOYMENT,
+        benchmark_comparison="Compared to standard.",
+        is_predatory=(risk_level == RiskLevel.RED),
+        plain_language_explanation="Plain English.",
+        scenario_consequence="If you sign this and X, then Y.",
+        key_implications=["Implication"],
+    )
+    return LegalReasonerOutput(
+        clauses=[clause],
+        overall_score=overall_score,
+        red_count=0, yellow_count=0, green_count=0,
+        document_type="employment_agreement",
+        executive_summary="Summary.",
+    )
+
+
+class TestOverallScorePassthrough:
+    def test_high_risk_employment_score_survives_agent4(self):
+        """Employment contract scored 8.2 by Agent 2 must stay ~8+, even when
+        Claude (Agent 4) returns a low inverted value like 3.2."""
+        source = _reasoner_output_with_score(8.2, RiskLevel.RED)
+        claude_says = {**VALID_AGENT4_RESPONSE, "overall_score": 3.2}
+        agent = NegotiatorAgent(_fake_client(claude_says))
+        result = asyncio.get_event_loop().run_until_complete(agent.run(source))
+        assert result.overall_score == 8.2
+        assert result.overall_score >= 8.0
+
+    def test_low_risk_consulting_score_survives_agent4(self):
+        """Low-risk consulting scored 2.5 by Agent 2 must stay low, even when
+        Claude returns a higher value like 5.5."""
+        source = _reasoner_output_with_score(2.5, RiskLevel.GREEN)
+        claude_says = {**VALID_AGENT4_RESPONSE, "overall_score": 5.5}
+        agent = NegotiatorAgent(_fake_client(claude_says))
+        result = asyncio.get_event_loop().run_until_complete(agent.run(source))
+        assert result.overall_score == 2.5
+
+    def test_risk_ordering_not_inverted(self):
+        """The high-risk doc must score strictly higher than the low-risk doc —
+        the exact inversion that was reported."""
+        high = _reasoner_output_with_score(8.2, RiskLevel.RED)
+        low = _reasoner_output_with_score(2.5, RiskLevel.GREEN)
+        # Claude returns inverted values for both; they must be ignored.
+        agent_high = NegotiatorAgent(_fake_client({**VALID_AGENT4_RESPONSE, "overall_score": 3.2}))
+        agent_low = NegotiatorAgent(_fake_client({**VALID_AGENT4_RESPONSE, "overall_score": 5.5}))
+        loop = asyncio.get_event_loop()
+        high_result = loop.run_until_complete(agent_high.run(high))
+        low_result = loop.run_until_complete(agent_low.run(low))
+        assert high_result.overall_score > low_result.overall_score
+
+    def test_overall_score_used_even_when_claude_omits_it(self):
+        """Claude no longer sends overall_score at all — Agent 2's must be used."""
+        source = _reasoner_output_with_score(7.0, RiskLevel.RED)
+        no_score = {k: v for k, v in VALID_AGENT4_RESPONSE.items() if k != "overall_score"}
+        agent = NegotiatorAgent(_fake_client(no_score))
+        result = asyncio.get_event_loop().run_until_complete(agent.run(source))
+        assert result.overall_score == 7.0

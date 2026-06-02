@@ -40,7 +40,6 @@ SCHEMA:
 {
   "executive_summary": "<MAX 150 chars: what must be fixed before signing?>",
   "top_risks": ["<MAX 80 chars each, 3-5 items>"],
-  "overall_score": <float 1.0-10.0>,
   "negotiation_advice": [
     {
       "clause_id": "<same clause_id from input>",
@@ -115,10 +114,9 @@ class NegotiatorAgent:
 
         raw.setdefault("executive_summary", source.executive_summary)
         raw.setdefault("top_risks", [])
-        try:
-            raw["overall_score"] = max(1.0, min(10.0, float(raw.get("overall_score", source.overall_score))))
-        except (ValueError, TypeError):
-            raw["overall_score"] = source.overall_score
+        # Agent 2 is the source of truth for overall_score (passed through Agent 3).
+        # Agent 4 must never generate or overwrite it — ignore any value Claude returns.
+        raw["overall_score"] = source.overall_score
 
         # Build advice lookup
         advice_lookup: dict[str, dict] = {}
