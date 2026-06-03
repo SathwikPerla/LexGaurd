@@ -73,6 +73,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # LLMClient validates ANTHROPIC_API_KEY — raises LLMConfigurationError if missing
         app.state.llm_client = LLMClient()
 
+        # Agent 2 (Risk Analyzer) runs on a stronger model — it produces the core
+        # risk judgments (severity scores, RED/YELLOW/GREEN, predatory flag, and the
+        # overall_score that flows through Agents 3 & 4 unchanged). Defaults to Opus;
+        # override or align with the base model via RISK_ANALYZER_MODEL_NAME.
+        risk_model = os.getenv("RISK_ANALYZER_MODEL_NAME", "claude-opus-4-8")
+        app.state.risk_llm_client = LLMClient(model_name=risk_model)
+
         # EmbeddingsStore fits TF-IDF on 21 benchmark clauses (instant, in-memory)
         app.state.embeddings_store = EmbeddingsStore()
         app.state.embeddings_store.ingest_benchmarks()
@@ -80,17 +87,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.pipeline_ready = True
         logger.info(
             "Pipeline ready",
-            extra={"model": app.state.llm_client._model_name},
+            extra={
+                "model": app.state.llm_client._model_name,
+                "risk_model": app.state.risk_llm_client._model_name,
+            },
         )
     except LLMConfigurationError as exc:
         logger.error("Pipeline init failed — ANTHROPIC_API_KEY missing", extra={"error": str(exc)})
         app.state.pipeline_ready = False
         app.state.llm_client = None
+        app.state.risk_llm_client = None
         app.state.embeddings_store = None
     except Exception as exc:
         logger.error("Pipeline init failed", extra={"error": str(exc)}, exc_info=True)
         app.state.pipeline_ready = False
         app.state.llm_client = None
+        app.state.risk_llm_client = None
         app.state.embeddings_store = None
 
     yield
@@ -300,6 +312,7 @@ async def analyze_endpoint(
             parse_method=result["parse_method"],
             llm_client=request.app.state.llm_client,
             embeddings_store=request.app.state.embeddings_store,
+            risk_llm_client=getattr(request.app.state, "risk_llm_client", None),
         )
     except LLMParseError as exc:
         logger.error("LLM returned invalid JSON", extra={"request_id": request_id, "error": str(exc)})

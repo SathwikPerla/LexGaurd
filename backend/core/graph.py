@@ -33,6 +33,7 @@ async def run_pipeline(
     parse_method: str,
     llm_client: LLMClient,
     embeddings_store: EmbeddingsStore | None = None,
+    risk_llm_client: LLMClient | None = None,
 ) -> AnalyzeResponse:
     """
     Run the full 4-agent pipeline on extracted document text.
@@ -44,6 +45,10 @@ async def run_pipeline(
         llm_client:      Shared LLMClient instance (initialised at app startup).
         embeddings_store: Shared EmbeddingsStore for benchmark comparison.
                           Pass None to skip benchmark enrichment.
+        risk_llm_client: Optional separate LLMClient for Agent 2 (Risk Analyzer).
+                          Agent 2 makes the core risk judgments every downstream
+                          agent builds on, so it can run on a stronger model.
+                          Falls back to llm_client when None.
 
     Returns:
         AnalyzeResponse — complete 4-agent risk intelligence report.
@@ -66,8 +71,8 @@ async def run_pipeline(
         extra={"clauses": extractor_output.total_clauses, "doc_type": extractor_output.document_type},
     )
 
-    # Agent 2 — Score and classify risk
-    agent2 = RiskAnalyzerAgent(llm_client, embeddings_store)
+    # Agent 2 — Score and classify risk (runs on risk_llm_client if provided)
+    agent2 = RiskAnalyzerAgent(risk_llm_client or llm_client, embeddings_store)
     risk_output = await agent2.run(extractor_output)
     logger.info(
         "Agent 2 done",
