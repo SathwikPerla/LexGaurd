@@ -30,6 +30,8 @@ from models.schemas import (
     RiskLevel,
 )
 
+from core.legal_duty import is_legal_duty_clause
+
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT: str = """You are a contract negotiation expert. Advise the signer on what to do about each clause.
@@ -58,6 +60,9 @@ STRICT LENGTH RULES — token budget is limited:
 4. alternative_wording: max 150 characters of actual rewritten contract text. Null for accept.
 5. negotiation_tips: exactly 2 items for negotiate/reject, empty array for accept. Each max 80 chars.
 6. RED/YELLOW clauses: recommended_action = negotiate or reject, always provide pushback + wording.
+   EXCEPTION: a clause that only restates a legal duty (e.g. do not alter evidence, do not influence
+   witnesses, do not bribe, do not obstruct justice) must be ACCEPT. The signer cannot lawfully
+   negotiate it away, so never suggest pushing back on it.
 7. GREEN clauses: recommended_action = accept, all other fields null or empty.
 8. Include ALL clauses. BREVITY IS REQUIRED — every field must be as short as possible."""
 
@@ -144,6 +149,17 @@ class NegotiatorAgent:
                 action = "accept" if clause.risk_level == RiskLevel.GREEN else "negotiate"
                 advice_lookup[clause.clause_id] = {
                     "recommended_action": action,
+                    "pushback_rationale": None,
+                    "alternative_wording": None,
+                    "negotiation_tips": [],
+                }
+
+        # Legal-duty clauses (e.g. "do not alter evidence or influence witnesses") are
+        # never negotiable, whatever the model said: force ACCEPT, drop any pushback.
+        for clause in source.clauses:
+            if is_legal_duty_clause(clause.original_text):
+                advice_lookup[clause.clause_id] = {
+                    "recommended_action": "accept",
                     "pushback_rationale": None,
                     "alternative_wording": None,
                     "negotiation_tips": [],

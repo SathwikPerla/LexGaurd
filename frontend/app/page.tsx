@@ -41,6 +41,12 @@ interface AnalyzeResponse {
   parse_method: string;
   report: Report;
   agents_completed: string[];
+  analysis_id: string;
+}
+
+interface ChatMsg {
+  role: "user" | "assistant";
+  content: string;
 }
 
 interface HistoryItem {
@@ -92,6 +98,26 @@ export default function Home() {
   const [showHistory, setShowHistory] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // ── Chat state ─────────────────────────────────────────────────────────
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Reset the conversation whenever the active analysis changes (new upload,
+  // history reopen, or cleared).
+  const activeId = result?.analysis_id ?? null;
+  useEffect(() => {
+    setChatMessages([]);
+    setChatInput("");
+    setChatError(null);
+  }, [activeId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, chatLoading]);
 
   // ── Expand all clauses before print, restore after ────────────────────
   useEffect(() => {
@@ -170,6 +196,40 @@ export default function Home() {
 
   const reset = () => { setFile(null); setResult(null); setError(null); };
 
+  // ── Chat ───────────────────────────────────────────────────────────────
+
+  const sendChat = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const msg = chatInput.trim();
+    if (!msg || chatLoading || !result?.analysis_id) return;
+
+    const priorHistory = chatMessages;
+    const userMsg: ChatMsg = { role: "user", content: msg };
+    setChatMessages(m => [...m, userMsg]);
+    setChatInput("");
+    setChatError(null);
+    setChatLoading(true);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Client-ID": getClientId() },
+        body: JSON.stringify({
+          analysis_id: result.analysis_id,
+          message: msg,
+          history: priorHistory,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`);
+      setChatMessages(m => [...m, { role: "assistant", content: data.reply }]);
+    } catch (err: unknown) {
+      setChatError(err instanceof Error ? err.message : "Chat failed — please try again.");
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   // ── Load a history item ───────────────────────────────────────────────
 
   const loadHistoryItem = async (id: string) => {
@@ -217,7 +277,7 @@ export default function Home() {
   return (
     <>
       {/* ── Styles ── */}
-      <style>{`
+      <style dangerouslySetInnerHTML={{ __html: `
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr !important; } }
 
@@ -273,7 +333,7 @@ export default function Home() {
           /* Force collapse arrows hidden in print */
           span[style*="font-size: 11"] { display: none !important; }
         }
-      `}</style>
+      ` }} />
 
       <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 16px", position: "relative" }}>
 
@@ -633,6 +693,95 @@ export default function Home() {
                 );
               })}
             </div>
+          </section>
+        )}
+
+        {/* ── Chat assistant — appears once a document is analyzed ── */}
+        {result && (
+          <section className="no-print" aria-label="Chat with the document"
+            style={{ marginTop: 28, background: "#161b27", border: "1px solid #374151",
+              borderRadius: 14, overflow: "hidden" }}>
+            <header style={{ padding: "14px 18px", borderBottom: "1px solid #374151",
+              background: "#1a2030" }}>
+              <h2 style={{ margin: 0, fontSize: 16, color: "#e5e7eb" }}>
+                💬 Ask LEXGUARD about this document
+              </h2>
+              <p style={{ margin: "4px 0 0", fontSize: 12, color: "#6b7280" }}>
+                The assistant has the full document and analysis in context. Ask anything —
+                what a clause means, how to push back, or what it really costs you.
+              </p>
+            </header>
+
+            <div style={{ maxHeight: 420, overflowY: "auto", padding: "16px 18px",
+              display: "flex", flexDirection: "column", gap: 12 }}>
+              {chatMessages.length === 0 && !chatLoading && (
+                <div style={{ color: "#6b7280", fontSize: 13, lineHeight: 1.6 }}>
+                  <p style={{ margin: "0 0 8px" }}>Try asking:</p>
+                  {[
+                    "Which clause is the most dangerous for me and why?",
+                    "How do I negotiate the non-compete down?",
+                    "Beyond money, what does this contract cost me in time and career?",
+                  ].map((q, i) => (
+                    <button key={i} onClick={() => setChatInput(q)}
+                      style={{ display: "block", textAlign: "left", width: "100%",
+                        background: "#0f1117", border: "1px solid #374151", color: "#9ca3af",
+                        borderRadius: 8, padding: "8px 12px", marginBottom: 6, fontSize: 12,
+                        cursor: "pointer" }}>
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {chatMessages.map((m, i) => (
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "85%", background: m.role === "user" ? "#2563eb" : "#0f1117",
+                  border: m.role === "user" ? "none" : "1px solid #374151",
+                  color: m.role === "user" ? "#fff" : "#e5e7eb",
+                  borderRadius: 12, padding: "10px 14px", fontSize: 13.5, lineHeight: 1.65,
+                  whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {m.content}
+                </div>
+              ))}
+
+              {chatLoading && (
+                <div aria-live="polite" style={{ alignSelf: "flex-start", color: "#9ca3af",
+                  fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 14, height: 14, border: "2px solid #374151",
+                    borderTopColor: "#6b7280", borderRadius: "50%",
+                    animation: "spin 0.7s linear infinite", display: "inline-block" }} />
+                  Thinking…
+                </div>
+              )}
+
+              {chatError && (
+                <div role="alert" style={{ alignSelf: "stretch", background: "#3d1a1a",
+                  border: "1px solid #ef5350", color: "#ffcdd2", borderRadius: 10,
+                  padding: "10px 14px", fontSize: 13 }}>
+                  {chatError}
+                </div>
+              )}
+
+              <div ref={chatEndRef} />
+            </div>
+
+            <form onSubmit={sendChat} style={{ display: "flex", gap: 8, padding: "12px 18px",
+              borderTop: "1px solid #374151", background: "#1a2030" }}>
+              <input value={chatInput} onChange={e => setChatInput(e.target.value)}
+                placeholder="Ask a question about this contract…"
+                aria-label="Your question"
+                disabled={chatLoading}
+                style={{ flex: 1, background: "#0f1117", border: "1px solid #374151",
+                  color: "#e5e7eb", borderRadius: 9, padding: "11px 14px", fontSize: 14,
+                  outline: "none" }} />
+              <button type="submit" disabled={chatLoading || !chatInput.trim()}
+                style={{ background: chatLoading || !chatInput.trim() ? "#374151" : "#2563eb",
+                  color: "#fff", border: "none", borderRadius: 9, padding: "0 20px",
+                  fontSize: 14, fontWeight: 600,
+                  cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer" }}>
+                Send
+              </button>
+            </form>
           </section>
         )}
 

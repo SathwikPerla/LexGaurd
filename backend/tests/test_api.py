@@ -94,6 +94,11 @@ def _make_fake_response(filename: str = "test.docx") -> AnalyzeResponse:
 def _make_client() -> TestClient:
     """TestClient with pipeline components patched — no API calls."""
     from main import app
+    from core.history import init_db
+
+    # Lifespan (and thus init_db) is not triggered by this manually-wired
+    # TestClient, so run the DB init/migration explicitly to match production.
+    init_db()
 
     mock_llm = MagicMock()
     mock_embeddings = MagicMock()
@@ -303,6 +308,94 @@ class TestAnalyze:
             r = client.post("/analyze", files={
                 "file": ("c.pdf", make_pdf(), "application/pdf")
             })
+            assert r.status_code == 503
+        finally:
+            app.state.pipeline_ready = original
+
+    def test_analyze_returns_analysis_id(self):
+        """Response must carry a non-empty analysis_id so the client can chat."""
+        body = self._post_docx().json()
+        assert body.get("analysis_id")
+        assert len(body["analysis_id"]) > 0
+
+
+# ── /chat ─────────────────────────────────────────────────────────────────────
+
+
+class TestChat:
+    """Chat endpoint tests — the LLM call is mocked; no real API calls."""
+
+    def _seed(self, client_id: str, document_text: str = "Employee shall not compete for 2 years.") -> str:
+        from core.history import save_analysis
+        resp = _make_fake_response("chat.docx").model_dump()
+        return save_analysis(client_id, resp, document_text, None)
+
+    def test_chat_200_and_reply(self):
+        from main import app
+        app.state.llm_client.generate_chat = AsyncMock(
+            return_value="The 2-year non-compete is the riskiest clause for you."
+        )
+        cid = "chat-test-200"
+        rid = self._seed(cid)
+        r = client.post("/chat",
+                        json={"analysis_id": rid, "message": "What's most risky?", "history": []},
+                        headers={"X-Client-ID": cid})
+        assert r.status_code == 200
+        assert "non-compete" in r.json()["reply"].lower()
+
+    def test_chat_forwards_history_and_message(self):
+        from main import app
+        mock = AsyncMock(return_value="ok")
+        app.state.llm_client.generate_chat = mock
+        cid = "chat-test-fwd"
+        rid = self._seed(cid)
+        client.post("/chat",
+                    json={"analysis_id": rid, "message": "second question",
+                          "history": [{"role": "user", "content": "first"},
+                                      {"role": "assistant", "content": "answer"}]},
+                    headers={"X-Client-ID": cid})
+        # generate_chat(system_prompt, context_block, messages)
+        messages = mock.call_args.args[2]
+        assert messages[-1] == {"role": "user", "content": "second question"}
+        assert len(messages) == 3  # 2 history + 1 new
+
+    def test_chat_unknown_analysis_404(self):
+        r = client.post("/chat",
+                        json={"analysis_id": "does-not-exist", "message": "hi", "history": []},
+                        headers={"X-Client-ID": "whoever"})
+        assert r.status_code == 404
+
+    def test_chat_cross_client_blocked_404(self):
+        rid = self._seed("owner-client")
+        r = client.post("/chat",
+                        json={"analysis_id": rid, "message": "hi", "history": []},
+                        headers={"X-Client-ID": "different-client"})
+        assert r.status_code == 404
+
+    def test_chat_empty_message_422(self):
+        cid = "chat-test-empty"
+        rid = self._seed(cid)
+        r = client.post("/chat",
+                        json={"analysis_id": rid, "message": "   ", "history": []},
+                        headers={"X-Client-ID": cid})
+        assert r.status_code == 422
+
+    def test_chat_pre_migration_row_409(self):
+        cid = "chat-test-old"
+        rid = self._seed(cid, document_text="")  # simulates a pre-chat row
+        r = client.post("/chat",
+                        json={"analysis_id": rid, "message": "hi", "history": []},
+                        headers={"X-Client-ID": cid})
+        assert r.status_code == 409
+
+    def test_chat_503_when_not_ready(self):
+        from main import app
+        original = getattr(app.state, "pipeline_ready", True)
+        app.state.pipeline_ready = False
+        try:
+            r = client.post("/chat",
+                            json={"analysis_id": "x", "message": "hi", "history": []},
+                            headers={"X-Client-ID": "c"})
             assert r.status_code == 503
         finally:
             app.state.pipeline_ready = original

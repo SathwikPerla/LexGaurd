@@ -52,6 +52,8 @@ GeminiClient = LLMClient
 GeminiCallError = LLMCallError
 GeminiParseError = LLMParseError
 
+from core.legal_duty import is_legal_duty_clause
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +99,10 @@ SCORING RULES:
 7. red_count, yellow_count, green_count in the output must be 0 — they will be auto-computed
 8. overall_score is the weighted average of severity scores — weight RED clauses 2x, YELLOW 1x, GREEN 0.5x
 9. Preserve clause_id, clause_type, original_text, is_ambiguous, ambiguity_note, contradicts_clause_ids exactly from input
-10. Every clause from input MUST appear in output — do not drop any"""
+10. Every clause from input MUST appear in output — do not drop any
+11. A clause that only restates a duty the signer already owes by law (e.g. do not alter evidence,
+    do not influence witnesses, do not bribe, do not obstruct justice) is standard and not a business
+    risk: severity_score 1.0–2.0, risk_level=GREEN, is_predatory=false."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +215,12 @@ class RiskAnalyzerAgent:
         # Clamp severity_score
         score = float(raw.get("severity_score", 5.0))
         score = max(1.0, min(10.0, score))
+        # Legal-duty clauses (do not alter evidence / influence witnesses, ...) are
+        # standard, not a risk: deterministic override of whatever the model scored.
+        if is_legal_duty_clause(raw.get("original_text")):
+            score = min(score, 2.0)
+            raw["risk_level"] = "GREEN"
+            raw["is_predatory"] = False
         raw["severity_score"] = score
 
         # Derive risk_level from score if missing or invalid

@@ -306,3 +306,27 @@ class AnalyzeResponse(BaseModel):
     parse_method: str
     report: NegotiationAdvisorOutput
     agents_completed: List[str] = Field(default_factory=list)
+    analysis_id: str = ""  # history record id; used to chat about this analysis
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat — context-aware assistant over an analyzed document
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ChatMessage(BaseModel):
+    """One turn in the chat conversation."""
+    role: str  # 'user' | 'assistant'
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """A chat turn: which analysis, the new message, and prior conversation."""
+    analysis_id: str
+    message: str
+    history: List[ChatMessage] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    """The assistant's reply."""
+    reply: str

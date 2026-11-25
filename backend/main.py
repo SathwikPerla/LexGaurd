@@ -28,12 +28,21 @@ from fastapi.middleware.cors import CORSMiddleware
 # pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse
 
-from core.history import delete_analysis, get_analysis, init_db, list_analyses, save_analysis
+from core.history import (
+    delete_analysis,
+    get_analysis,
+    get_chat_context,
+    init_db,
+    list_analyses,
+    save_analysis,
+)
 from core.logging_config import setup_logging
 from core.document_parser import parse_document
 from core.ocr_handler import ocr_pdf_bytes
 from models.schemas import (
     AnalyzeResponse,
+    ChatRequest,
+    ChatResponse,
     HealthResponse,
     ParsedDocumentResponse,
 )
@@ -345,11 +354,20 @@ async def analyze_endpoint(
         },
     )
 
-    # Persist to history — fire-and-forget, never block the response
+    # Persist to history — fire-and-forget, never block the response.
+    # We generate the record id up front and stamp it onto the response so the
+    # client can chat about this analysis later; the document text is stored so
+    # the chat endpoint can rebuild context server-side.
     client_id = request.headers.get("X-Client-ID", "anonymous")
+    record_id = str(uuid.uuid4())
+    response.analysis_id = record_id
     try:
-        record_id = await asyncio.to_thread(
-            save_analysis, client_id, response.model_dump()
+        await asyncio.to_thread(
+            save_analysis,
+            client_id,
+            response.model_dump(),
+            result["extracted_text"],
+            record_id,
         )
         logger.info("History saved", extra={"record_id": record_id})
     except Exception as exc:
@@ -400,6 +418,107 @@ async def delete_history_item(record_id: str, request: Request) -> Any:
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found.")
     return {"deleted": record_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat — context-aware assistant over an analyzed document
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHAT_SYSTEM_PROMPT = """You are LEXGUARD's contract assistant. You are the USER'S advocate — never the counterparty's.
+
+You are given, as context, the FULL text of a document the user is considering signing, plus LEXGUARD's clause-by-clause risk analysis of it. Answer the user's questions about this specific document.
+
+CORE PRINCIPLES:
+- Ground every answer in the actual document text and the analysis provided. Quote or cite the specific clause you are referring to. If something is not addressed in the document, say so plainly — never invent terms.
+- When a clause is costly, weigh the cost across ALL dimensions, not just money: career mobility, personal time, work-life balance, autonomy/control, reputation, legal exposure, and mental/emotional load. Name the specific burden.
+- When the user wants a solution or to push back, give concrete, actionable negotiation strategy: what to ask for, why it is reasonable (benchmark/standard practice), and suggested alternative wording they could propose.
+- Be honest about severity. Distinguish "predatory / unusual" from "standard / acceptable." Do not alarm the user about boilerplate, and do not soften genuinely dangerous terms.
+- Be concise and plain-spoken. Use short paragraphs or bullet points. Avoid legalese; explain any necessary term.
+
+You are an informational tool, not a lawyer. If the user faces a high-stakes decision, remind them to consult a licensed attorney — but still give your best substantive analysis first."""
+
+_MAX_CHAT_HISTORY_TURNS = 20  # cap forwarded turns to bound context growth
+
+
+def _build_chat_context(document_text: str, report: dict[str, Any], filename: str) -> str:
+    """Assemble the cached context prefix: full document + analysis report."""
+    import json as _json
+    return (
+        f"=== DOCUMENT: {filename} ===\n"
+        f"{document_text}\n\n"
+        "=== LEXGUARD ANALYSIS REPORT (JSON) ===\n"
+        f"{_json.dumps(report, ensure_ascii=False)}\n"
+        "=== END CONTEXT ==="
+    )
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Chat"],
+    summary="Chat with an AI assistant about an analyzed document",
+)
+async def chat_endpoint(request: Request, body: ChatRequest) -> ChatResponse:
+    """
+    Ask questions about a previously analyzed document. The assistant sees the
+    full document text plus LEXGUARD's analysis and answers as the user's advocate.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    if not getattr(request.app.state, "pipeline_ready", False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI pipeline is not ready. ANTHROPIC_API_KEY may be missing from .env.",
+        )
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Message cannot be empty.",
+        )
+
+    client_id = request.headers.get("X-Client-ID", "anonymous")
+    ctx = await asyncio.to_thread(get_chat_context, body.analysis_id, client_id)
+    if ctx is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis not found for this session.",
+        )
+    if not ctx["document_text"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This analysis predates chat support. Re-upload the document to chat about it.",
+        )
+
+    context_block = _build_chat_context(ctx["document_text"], ctx["report"], ctx["filename"])
+
+    # Build the conversation: prior history (capped) + the new user message.
+    messages: list[dict[str, str]] = [
+        {"role": m.role, "content": m.content}
+        for m in body.history[-_MAX_CHAT_HISTORY_TURNS:]
+        if m.role in ("user", "assistant") and m.content.strip()
+    ]
+    messages.append({"role": "user", "content": message})
+
+    from core.gemini_client import LLMCallError
+
+    logger.info("Chat request", extra={"request_id": request_id, "analysis_id": body.analysis_id,
+                                       "turns": len(messages)})
+    try:
+        reply = await request.app.state.llm_client.generate_chat(
+            CHAT_SYSTEM_PROMPT, context_block, messages
+        )
+    except LLMCallError as exc:
+        logger.error("Chat LLM call failed", extra={"request_id": request_id, "error": str(exc)})
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"AI chat call failed: {str(exc)[:300]}")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="Chat timed out. Try a shorter question.")
+
+    return ChatResponse(reply=reply)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

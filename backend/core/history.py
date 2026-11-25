@@ -44,33 +44,52 @@ def init_db() -> None:
     with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS analyses (
-                id           TEXT PRIMARY KEY,
-                client_id    TEXT NOT NULL,
-                filename     TEXT NOT NULL,
-                created_at   TEXT NOT NULL,
-                doc_type     TEXT NOT NULL,
-                score        REAL NOT NULL,
-                red_count    INTEGER NOT NULL,
-                yellow_count INTEGER NOT NULL,
-                green_count  INTEGER NOT NULL,
-                report_json  TEXT NOT NULL
+                id            TEXT PRIMARY KEY,
+                client_id     TEXT NOT NULL,
+                filename      TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                doc_type      TEXT NOT NULL,
+                score         REAL NOT NULL,
+                red_count     INTEGER NOT NULL,
+                yellow_count  INTEGER NOT NULL,
+                green_count   INTEGER NOT NULL,
+                report_json   TEXT NOT NULL,
+                document_text TEXT NOT NULL DEFAULT ''
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_client ON analyses(client_id, created_at DESC)")
+
+        # Migration: add document_text to pre-existing tables that lack it.
+        # Old rows get '' and are not chat-able (the /chat endpoint returns 409).
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(analyses)")}
+        if "document_text" not in cols:
+            conn.execute("ALTER TABLE analyses ADD COLUMN document_text TEXT NOT NULL DEFAULT ''")
+            logger.info("History DB migrated: added document_text column")
+
         conn.commit()
     logger.info("History DB initialised", extra={"path": str(DB_PATH)})
 
 
-def save_analysis(client_id: str, response_dict: dict[str, Any]) -> str:
-    """Persist a completed analysis. Returns the new record ID."""
-    record_id = str(uuid.uuid4())
+def save_analysis(
+    client_id: str,
+    response_dict: dict[str, Any],
+    document_text: str = "",
+    record_id: str | None = None,
+) -> str:
+    """
+    Persist a completed analysis. Returns the record ID.
+
+    Pass `record_id` to use a caller-supplied id (so the API can return it to the
+    client for later chat). Pass `document_text` to enable chat on this analysis.
+    """
+    record_id = record_id or str(uuid.uuid4())
     report = response_dict.get("report", {})
     with _conn() as conn:
         conn.execute(
             """INSERT INTO analyses
                (id, client_id, filename, created_at, doc_type, score,
-                red_count, yellow_count, green_count, report_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                red_count, yellow_count, green_count, report_json, document_text)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 record_id,
                 client_id,
@@ -82,10 +101,32 @@ def save_analysis(client_id: str, response_dict: dict[str, Any]) -> str:
                 report.get("yellow_count", 0),
                 report.get("green_count", 0),
                 json.dumps(response_dict),
+                document_text,
             ),
         )
         conn.commit()
     return record_id
+
+
+def get_chat_context(record_id: str, client_id: str) -> dict[str, Any] | None:
+    """
+    Return the document text + analysis report needed to chat about one analysis,
+    scoped to the owning client. Returns None if the record does not exist or is
+    not owned by this client. `document_text` may be '' for pre-migration rows.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT report_json, document_text FROM analyses WHERE id = ? AND client_id = ?",
+            (record_id, client_id),
+        ).fetchone()
+    if row is None:
+        return None
+    full = json.loads(row["report_json"])
+    return {
+        "document_text": row["document_text"] or "",
+        "report": full.get("report", {}),
+        "filename": full.get("filename", "document"),
+    }
 
 
 def list_analyses(client_id: str, limit: int = 20) -> list[dict[str, Any]]:
