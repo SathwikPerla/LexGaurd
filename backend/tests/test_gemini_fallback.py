@@ -154,3 +154,68 @@ class TestExactCreditError:
         client._client.beta.prompt_caching.messages.create.side_effect = self._credit_error()
         with pytest.raises(LLMCallError, match="credit balance is too low"):
             client._call_json_sync("sys", "contract text")
+
+
+class TestProviderOverride:
+    """FALLBACK_* env vars point the same adapter at any OpenAI-compatible provider."""
+
+    def test_fallback_env_overrides_url_model_and_key(self, monkeypatch):
+        monkeypatch.setenv("FALLBACK_API_KEY", "mistral-key")
+        monkeypatch.setenv("FALLBACK_BASE_URL", "https://api.mistral.ai/v1/")
+        monkeypatch.setenv("FALLBACK_MODEL_NAME", "mistral-large-latest")
+        client = _client(monkeypatch, anthropic_key=None, gemini_key="gm-ignored")
+        with patch("httpx.post", return_value=_gemini_response("hi")) as post:
+            assert client._call_text_sync("sys", "hello") == "hi"
+        assert post.call_args.args[0] == "https://api.mistral.ai/v1/chat/completions"
+        assert post.call_args.kwargs["json"]["model"] == "mistral-large-latest"
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer mistral-key"
+
+    def test_default_still_points_at_gemini(self, monkeypatch):
+        client = _client(monkeypatch, anthropic_key=None)
+        with patch("httpx.post", return_value=_gemini_response("hi")) as post:
+            client._call_text_sync("sys", "hello")
+        assert post.call_args.args[0].startswith("https://generativelanguage.googleapis.com/v1beta/openai/")
+
+
+class TestFallbackChain:
+    """Gemini first, then Groq: the next provider is tried when one fails."""
+
+    def _two_providers(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "gq-test")
+        return _client(monkeypatch)  # also sets ANTHROPIC + GEMINI keys
+
+    def test_chain_order_is_gemini_then_groq(self, monkeypatch):
+        client = self._two_providers(monkeypatch)
+        assert [f["label"] for f in client._fallbacks] == ["gemini", "groq"]
+
+    def test_groq_only_works_without_gemini_key(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "gq-test")
+        client = _client(monkeypatch, gemini_key=None)
+        assert [f["label"] for f in client._fallbacks] == ["groq"]
+        with patch("httpx.post", return_value=_gemini_response("from groq")) as post:
+            client._client.beta.prompt_caching.messages.create.side_effect = RuntimeError("credits")
+            assert client._call_text_sync("sys", "hi") == "from groq"
+        assert post.call_args.args[0] == "https://api.groq.com/openai/v1/chat/completions"
+        assert post.call_args.kwargs["json"]["model"] == "openai/gpt-oss-120b"
+
+    def test_gemini_403_falls_through_to_groq(self, monkeypatch):
+        client = self._two_providers(monkeypatch)
+        client._client.beta.prompt_caching.messages.create.side_effect = RuntimeError("credits")
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            if "generativelanguage" in url:
+                return _gemini_response("", status=403)
+            return _gemini_response("groq answer")
+
+        with patch("httpx.post", side_effect=fake_post):
+            assert client._call_text_sync("sys", "hi") == "groq answer"
+        assert len(calls) == 2 and "groq" in calls[1]
+
+    def test_all_providers_failing_reports_each(self, monkeypatch):
+        client = self._two_providers(monkeypatch)
+        client._client.beta.prompt_caching.messages.create.side_effect = RuntimeError("credits")
+        with patch("httpx.post", return_value=_gemini_response("", status=403)):
+            with pytest.raises(LLMCallError, match="gemini:.*groq:"):
+                client._call_text_sync("sys", "hi")

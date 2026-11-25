@@ -52,6 +52,43 @@ MAX_TOKENS_CHAT: int = 4096  # chat answers include negotiation strategy + alt w
 # with GEMINI_MODEL_NAME; GEMINI_REASONING_EFFORT is passed through if provided.
 _GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai"
 _GEMINI_DEFAULT_MODEL: str = "gemini-2.5-flash"
+_GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+_GROQ_DEFAULT_MODEL: str = "openai/gpt-oss-120b"
+
+
+def _build_fallback_chain(explicit_key: str | None = None) -> list[dict[str, str]]:
+    """
+    Ordered list of OpenAI-compatible fallback providers, tried one after another
+    when Claude fails. Providers without a key are simply absent.
+
+      1. FALLBACK_API_KEY (+ FALLBACK_BASE_URL, FALLBACK_MODEL_NAME) or GEMINI_API_KEY
+         (Gemini by default; FALLBACK_* can point it at Mistral, OpenRouter, ...)
+      2. GROQ_API_KEY (+ optional GROQ_MODEL_NAME)
+    """
+    chain: list[dict[str, str]] = []
+    key = explicit_key or os.getenv("FALLBACK_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if key:
+        base = (os.getenv("FALLBACK_BASE_URL") or _GEMINI_BASE_URL).rstrip("/")
+        chain.append(
+            {
+                "label": "gemini" if base == _GEMINI_BASE_URL else "custom",
+                "key": key,
+                "base_url": base,
+                "model": os.getenv("FALLBACK_MODEL_NAME")
+                or os.getenv("GEMINI_MODEL_NAME", _GEMINI_DEFAULT_MODEL),
+            }
+        )
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        chain.append(
+            {
+                "label": "groq",
+                "key": groq_key,
+                "base_url": _GROQ_BASE_URL,
+                "model": os.getenv("GROQ_MODEL_NAME") or _GROQ_DEFAULT_MODEL,
+            }
+        )
+    return chain
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,13 +260,12 @@ class LLMClient:
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._model_name = model_name or os.getenv("CLAUDE_MODEL_NAME", "claude-sonnet-4-6")
 
-        # Optional fallback provider. Claude stays the primary path; Gemini is only
-        # used when a Claude call fails (e.g. credits exhausted) or when no
-        # Anthropic key is configured at all. Unset GEMINI_API_KEY = old behaviour.
-        self._gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
-        self._gemini_model = os.getenv("GEMINI_MODEL_NAME", _GEMINI_DEFAULT_MODEL)
+        # Optional fallback providers. Claude stays the primary path; the chain is
+        # only used when a Claude call fails (e.g. credits exhausted) or when no
+        # Anthropic key is configured at all. No fallback keys = old behaviour.
+        self._fallbacks = _build_fallback_chain(gemini_api_key)
 
-        if not self._api_key and not self._gemini_key:
+        if not self._api_key and not self._fallbacks:
             raise LLMConfigurationError(
                 "ANTHROPIC_API_KEY is not set. Add it to your .env file."
             )
@@ -240,15 +276,15 @@ class LLMClient:
             "LLMClient initialised",
             extra={
                 "model": self._model_name,
-                "gemini_fallback": bool(self._gemini_key),
-                "primary": "anthropic" if self._client else "gemini",
+                "fallbacks": [f["label"] for f in self._fallbacks],
+                "primary": "anthropic" if self._client else "fallback",
             },
         )
 
-    # ── Gemini fallback (OpenAI-compatible REST endpoint, via httpx) ──────────
+    # ── Fallback chain (OpenAI-compatible REST endpoints, via httpx) ──────────
 
     def _gemini_enabled(self) -> bool:
-        return bool(self._gemini_key)
+        return bool(self._fallbacks)
 
     def _gemini_complete(
         self,
@@ -256,28 +292,51 @@ class LLMClient:
         messages: list[dict[str, str]],
         max_tokens: int,
     ) -> str:
-        """Synchronous Gemini call (runs inside asyncio.to_thread like the Claude calls)."""
+        """Try each configured fallback provider in order (name kept for the 3 call sites)."""
+        errors: list[str] = []
+        for provider in self._fallbacks:
+            try:
+                return self._call_openai_compatible(provider, system_text, messages, max_tokens)
+            except LLMCallError as exc:
+                errors.append(f"{provider['label']}: {str(exc)[:200]}")
+                logger.warning(
+                    "Fallback provider failed",
+                    extra={"provider": provider["label"], "error": str(exc)[:200]},
+                )
+        raise LLMCallError("All fallback providers failed. " + " | ".join(errors))
+
+    def _call_openai_compatible(
+        self,
+        provider: dict[str, str],
+        system_text: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> str:
+        """One provider, with retry on 429/5xx/network errors (runs inside asyncio.to_thread)."""
         import time
 
         import httpx
 
         payload: dict[str, Any] = {
-            "model": self._gemini_model,
+            "model": provider["model"],
             "max_tokens": max_tokens,
             "messages": [{"role": "system", "content": system_text}, *messages],
         }
         effort = os.getenv("GEMINI_REASONING_EFFORT")
-        if effort:
+        if effort and provider["label"] == "gemini":
             payload["reasoning_effort"] = effort
+        elif provider["label"] == "groq" and provider["model"].startswith("openai/gpt-oss"):
+            # gpt-oss are reasoning models: keep reasoning short so tokens go to the answer.
+            payload["reasoning_effort"] = os.getenv("GROQ_REASONING_EFFORT", "low")
 
-        headers = {"Authorization": f"Bearer {self._gemini_key}"}
+        headers = {"Authorization": f"Bearer {provider['key']}"}
         timeout = httpx.Timeout(max(30.0, CALL_TIMEOUT_SECONDS - 20.0), connect=15.0)
         last_error: BaseException | None = None
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 resp = httpx.post(
-                    f"{_GEMINI_BASE_URL}/chat/completions",
+                    f"{provider['base_url']}/chat/completions",
                     headers=headers,
                     json=payload,
                     timeout=timeout,
@@ -286,30 +345,30 @@ class LLMClient:
                 last_error = exc
             else:
                 if resp.status_code in (429, 500, 502, 503, 504):
-                    last_error = LLMCallError(f"Gemini HTTP {resp.status_code}")
+                    last_error = LLMCallError(f"Fallback LLM HTTP {resp.status_code}")
                 elif resp.status_code >= 400:
-                    # Never log the key; Google error bodies do not echo it.
+                    # Never log the key; provider error bodies do not echo it.
                     raise LLMCallError(
-                        f"Gemini call failed: HTTP {resp.status_code}: {resp.text[:300]}"
+                        f"Fallback LLM call failed: HTTP {resp.status_code}: {resp.text[:300]}"
                     )
                 else:
                     try:
                         text = resp.json()["choices"][0]["message"]["content"]
                     except (KeyError, IndexError, TypeError, ValueError) as exc:
-                        raise LLMCallError("Gemini returned an unexpected response shape.") from exc
+                        raise LLMCallError("Fallback LLM returned an unexpected response shape.") from exc
                     if not text:
-                        raise LLMCallError("Gemini returned empty content.")
+                        raise LLMCallError("Fallback LLM returned empty content.")
                     return text
 
             if attempt < _MAX_ATTEMPTS:
                 logger.warning(
-                    "Gemini call retrying",
-                    extra={"attempt": attempt, "error": str(last_error)[:200]},
+                    "Fallback LLM call retrying",
+                    extra={"provider": provider["label"], "attempt": attempt, "error": str(last_error)[:200]},
                 )
                 time.sleep(min(_BACKOFF_MAX, _BACKOFF_MIN * (2 ** (attempt - 1))))
 
         raise LLMCallError(
-            f"Gemini call failed after {_MAX_ATTEMPTS} attempts."
+            f"Fallback LLM call failed after {_MAX_ATTEMPTS} attempts."
         ) from last_error
 
     def _build_client(self):  # type: ignore[return]
@@ -370,7 +429,7 @@ class LLMClient:
         except Exception as exc:
             if self._gemini_enabled():
                 logger.warning(
-                    "Claude JSON call failed; falling back to Gemini",
+                    "Claude JSON call failed; falling back to the fallback LLM",
                     extra={"error_type": type(exc).__name__},
                 )
                 raw_text = self._gemini_complete(system_prompt, gemini_messages, MAX_TOKENS_JSON)
@@ -431,7 +490,7 @@ class LLMClient:
         except Exception as exc:
             if self._gemini_enabled():
                 logger.warning(
-                    "Claude text call failed; falling back to Gemini",
+                    "Claude text call failed; falling back to the fallback LLM",
                     extra={"error_type": type(exc).__name__},
                 )
                 return self._gemini_complete(system_prompt, gemini_messages, MAX_TOKENS_TEXT)
@@ -495,7 +554,7 @@ class LLMClient:
         except Exception as exc:
             if self._gemini_enabled():
                 logger.warning(
-                    "Claude chat call failed; falling back to Gemini",
+                    "Claude chat call failed; falling back to the fallback LLM",
                     extra={"error_type": type(exc).__name__},
                 )
                 return self._gemini_complete(gemini_system, messages, MAX_TOKENS_CHAT)

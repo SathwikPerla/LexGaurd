@@ -16,3 +16,5 @@ def _no_gemini_fallback_by_default(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL_NAME", raising=False)
     monkeypatch.delenv("GEMINI_REASONING_EFFORT", raising=False)
+    for name in ("FALLBACK_API_KEY", "FALLBACK_BASE_URL", "FALLBACK_MODEL_NAME", "GROQ_API_KEY", "GROQ_MODEL_NAME", "GROQ_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
